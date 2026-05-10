@@ -1,0 +1,16 @@
+app:
+  name: "My Web Application"
+  url: ${APP_URL}
+  description: "Brief description of the application under test. Surfaces in agent prompts to give the agent domain context."
+
+auth:
+  method: form
+  selectors:
+    username: 'input[name="username"]'
+    password: 'input[name="password"]'
+    submit: 'button[type="submit"]'
+  post_login_check: 'a[href="/home"]'
+
+paths:
+  mcp_servers: ./mcp_servers.json
+  skills_root: ./agent-skills

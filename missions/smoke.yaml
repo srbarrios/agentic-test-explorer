@@ -1,0 +1,41 @@
+missions:
+  - thread_id: "smoke_listing_01"
+    prompt: >
+      Navigate to the main list/search view in <YOUR_APP> (e.g., <list_page_path>).
+      Type "<example_search_term>" into the search bar and submit. Verify a non-empty
+      result list is rendered, paginate or scroll once, then click a row to open its
+      detail view. Confirm the detail view contains the searched term and that closing
+      it returns you to the list with state preserved.
+
+  - thread_id: "smoke_graph_01"
+    prompt: >
+      Navigate to a graph or timeline visualization in <YOUR_APP> (e.g., <graph_page_path>).
+      Wait for the graph to render fully. Hover at least three nodes/edges and verify
+      tooltips appear with the expected fields. Use 'analyze_visual_state' to confirm
+      that nodes do not overlap, that connecting lines are continuous, and that the
+      layout has no obvious clipping or rendering glitches.
+
+  - thread_id: "smoke_chart_01"
+    prompt: >
+      Navigate to a dashboard or chart-heavy page in <YOUR_APP> (e.g., <dashboard_path>).
+      Open the time-range picker (or equivalent filter) and switch to <example_time_range>.
+      Wait for charts to refresh. Use 'analyze_visual_state' to verify axis labels are
+      legible, that data lines/bars render without gaps, and that legend toggles correctly
+      hide/show series.
+
+  - thread_id: "smoke_map_01"
+    prompt: >
+      Navigate to the map or status-grid view in <YOUR_APP> (e.g., <map_page_path>).
+      Wait for markers/tiles to render. Pan and zoom once. Use 'analyze_visual_state' to
+      verify markers are placed inside the viewport, clusters expand correctly when
+      zoomed in, and that no tiles are missing or duplicated. Hover one marker to confirm
+      the popup shows the expected attributes.
+
+  - thread_id: "smoke_form_01"
+    prompt: >
+      Navigate to the main create/edit form in <YOUR_APP> (e.g., <form_page_path>).
+      First, submit the form empty to verify required-field validation messages render
+      with clear, actionable text. Then fill in the minimum valid values for each
+      required field, submit, and confirm the success state (toast, redirect, or new row).
+      Capture a screenshot if any validation message is missing, misleading, or appears
+      after a successful submission.

@@ -1,0 +1,64 @@
+missions:
+  - thread_id: "explorer_chaos_basic"
+    prompt: >
+      Become an autonomous engineer chasing an unreproducible incident in <YOUR_APP>.
+
+      Mission: Explore the application chaotically to find bugs, crashes, and UX issues.
+
+      Exploration Guidelines:
+
+      1. Start Location: Navigate to the application homepage (<APP_URL>) and use
+         `get_dom_snapshot` to discover the main entry points.
+
+      2. Random Walk Strategy:
+         - Visit each major area you can find from the navigation
+         - For each area, perform 5-10 random interactions
+         - Don't follow tutorials or scripted flows — be genuinely chaotic
+
+      3. Chaos Patterns to Test:
+         a) Rapid Filter / Input Changes:
+            - Add multiple filters or query terms simultaneously
+            - Change time ranges, date pickers, or pagination during loading
+            - Remove filters before results finish loading
+
+         b) Cross-Page Navigation:
+            - Navigate from a detail view to a related list, then back
+            - Use browser back/forward unexpectedly
+            - Verify any preserved context (filters, selections) is still correct
+
+         c) Extreme Inputs:
+            - Submit very long strings into text inputs
+            - Pick the largest available result-count or page size
+            - Choose unusual time ranges or date boundaries
+
+         d) Table / List Stress Testing:
+            - Add many columns or expanded rows simultaneously
+            - Sort by different columns rapidly
+            - Open multiple detail flyouts without closing previous ones
+
+      4. Error Detection:
+         - Watch for infinite spinners (>30 seconds with no content)
+         - Inline error banners ("Request failed", "Timeout", server errors)
+         - HTTP 5xx surfaced in the UI
+         - Blank/white screens after navigation
+
+      5. For EVERY error found:
+         - Capture a bug screenshot
+         - Document the exact steps to reproduce
+         - Call `generate_reproduction_spec` to translate the Action Tape into a runnable
+           Playwright test
+
+      Expected Outcome: A comprehensive bug report with 10+ interaction paths tested.
+
+  - thread_id: "explorer_stress_ui"
+    prompt: >
+      Stress-test <YOUR_APP>'s UI with intensive, rapid interactions.
+
+      Tests:
+      1. Open multiple detail panels/flyouts without closing previous ones
+      2. Type rapid queries into the main search input (10 in 30 seconds)
+      3. Click pagination "Next" repeatedly (50+ times)
+      4. Resize the browser window while data is loading
+      5. Switch between light/dark mode (or any theme toggle) during rendering
+
+      Goal: Find race conditions, memory leaks, or rendering bugs.

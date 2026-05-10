@@ -1,0 +1,13 @@
+.env
+.venv
+__pycache__/
+.DS_Store
+agent_memory.*
+auth.json
+.idea
+.claude
+
+# Python build artifacts
+*.egg-info/
+build/
+dist/
