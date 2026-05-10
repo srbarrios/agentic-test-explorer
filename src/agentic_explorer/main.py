@@ -5,7 +5,6 @@ import yaml
 from dotenv import load_dotenv
 
 from langchain_core.messages import HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from langchain_community.agent_toolkits import PlayWrightBrowserToolkit
@@ -15,6 +14,7 @@ from langchain_core.globals import set_verbose
 
 from agentic_explorer.tools.browser.engine import get_action_tape
 from agentic_explorer.config import load_app_config
+from agentic_explorer.utils.llm import make_llm
 
 set_verbose(True)
 
@@ -39,9 +39,6 @@ def _is_transient_error(exc: Exception) -> bool:
 
 
 async def run_missions():
-    if not os.getenv("GOOGLE_API_KEY"):
-        raise ValueError("Please set your GOOGLE_API_KEY environment variable.")
-
     parser = argparse.ArgumentParser(description="Run Agentic Exploratory Tests")
     parser.add_argument("--missions", type=str, default=None, help="Path to the YAML missions file")
     parser.add_argument("--pr-url", type=str, default=None, help="GitHub PR URL to analyze and generate test missions from")
@@ -50,7 +47,20 @@ async def run_missions():
     parser.add_argument("--headed", action="store_true", help="Run browser with visible UI")
     parser.add_argument("--clear-memory", action="store_true", help="Delete the previous SQLite memory database")
     parser.add_argument("--max-steps", type=int, default=30, help="Maximum LangGraph execution steps per mission before resetting to homepage (default: 30)")
+    parser.add_argument(
+        "--provider", type=str, default=None, choices=["gemini", "claude"],
+        help="LLM provider to use — overrides LLM_PROVIDER env var and config.yaml",
+    )
     args = parser.parse_args()
+
+    # Apply --provider before the credential probe so it validates the right provider.
+    if args.provider:
+        os.environ["LLM_PROVIDER"] = args.provider
+
+    try:
+        make_llm(temperature=0)  # early credential probe — raises RuntimeError with clear message
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
 
     if not args.missions and not args.pr_url:
         parser.error("At least one of --missions or --pr-url is required")
@@ -222,8 +232,12 @@ async def run_missions():
 
             clean_transcript = "\n".join(transcript_lines)
 
-            report_model = os.getenv("GEMINI_REPORT_MODEL", os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"))
-            report_llm = ChatGoogleGenerativeAI(model=report_model, temperature=0)
+            _active_provider = os.getenv("LLM_PROVIDER", "").lower()
+            report_model = (
+                os.getenv("CLAUDE_REPORT_MODEL") if _active_provider == "claude"
+                else os.getenv("GEMINI_REPORT_MODEL")
+            ) or None
+            report_llm = make_llm(temperature=0, model_name=report_model)
 
             bugs_section = ""
             if bugs_found:

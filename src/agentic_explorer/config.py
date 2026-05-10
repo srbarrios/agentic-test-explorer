@@ -53,10 +53,20 @@ class PathsConfig:
 
 
 @dataclass
+class LLMConfig:
+    provider: Optional[str] = None          # "gemini" | "claude" | None (auto-detect)
+    gemini_model: Optional[str] = None
+    claude_model: Optional[str] = None
+    gemini_vision_model: Optional[str] = None
+    claude_vision_model: Optional[str] = None
+
+
+@dataclass
 class AppConfig:
     app: AppMeta = field(default_factory=AppMeta)
     auth: AuthConfig = field(default_factory=AuthConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
 
 
 def load_app_config(path: Optional[str | Path] = None) -> AppConfig:
@@ -82,6 +92,7 @@ def load_app_config(path: Optional[str | Path] = None) -> AppConfig:
     app_raw = raw.get("app", {}) or {}
     auth_raw = raw.get("auth", {}) or {}
     paths_raw = raw.get("paths", {}) or {}
+    llm_raw = raw.get("llm", {}) or {}
 
     return AppConfig(
         app=AppMeta(
@@ -97,5 +108,12 @@ def load_app_config(path: Optional[str | Path] = None) -> AppConfig:
         paths=PathsConfig(
             mcp_servers=paths_raw.get("mcp_servers") or os.getenv("MCP_SERVERS_CONFIG"),
             skills_root=paths_raw.get("skills_root") or os.getenv("AGENT_SKILLS_ROOT"),
+        ),
+        llm=LLMConfig(
+            provider=llm_raw.get("provider") or None,
+            gemini_model=llm_raw.get("gemini_model") or None,
+            claude_model=llm_raw.get("claude_model") or None,
+            gemini_vision_model=llm_raw.get("gemini_vision_model") or None,
+            claude_vision_model=llm_raw.get("claude_vision_model") or None,
         ),
     )

@@ -1,12 +1,16 @@
 aiohttp==3.13.5
 aiosqlite==0.21.0
+anthropic>=0.100.0
+google-auth>=2.29.0
 httpx==0.28.1
 httpx-sse==0.4.3
 langchain==1.2.15
 langchain-classic==1.0.3
 langchain-community==0.4.1
 langchain-core==1.2.31
+langchain-anthropic>=0.3.0
 langchain-google-genai==4.2.2
+langchain-google-vertexai>=2.0.0
 langchain-mcp-adapters==0.2.2
 langchain-openai==1.1.12
 langchain-text-splitters==1.1.1

@@ -17,6 +17,8 @@ from typing import Annotated, Any, Dict, List, Sequence, TypedDict
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agentic_explorer.tools.browser.engine import get_action_tape
+from agentic_explorer.utils.llm import make_llm  # noqa: F401  re-exported for back-compat
+
 
 # ---------------------------------------------------------
 # Shared state schema
@@ -123,6 +125,8 @@ def make_supervisor_node(llm, agent_names: tuple, app_url: str, max_steps: int):
     """
     available_agents = ", ".join(f"'{n}'" for n in agent_names)
     routing_schema = {
+        "title": "SupervisorRouting",
+        "description": "Select the next agent to act or FINISH.",
         "type": "object",
         "properties": {
             "next": {"type": "string", "enum": [*agent_names, "FINISH"]},

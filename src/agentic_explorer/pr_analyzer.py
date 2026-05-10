@@ -26,9 +26,9 @@ from typing import Any, Optional, Union
 
 import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from agentic_explorer.config import AppMeta
+from agentic_explorer.utils.llm import make_llm
 from agentic_explorer.utils.llm_json import extract_yaml_text
 
 _PR_URL_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
@@ -416,11 +416,8 @@ def _is_transient_error(exc: Exception) -> bool:
 
 async def generate_missions_from_pr(pr_data: PRData, app: AppMeta) -> dict:
     """Use an LLM to generate targeted test missions from PR data."""
-    model_name = os.getenv(
-        "GEMINI_SCENARIO_MODEL",
-        os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
-    )
-    llm = ChatGoogleGenerativeAI(model=model_name, temperature=0)
+    model_name = os.getenv("SCENARIO_MODEL") or os.getenv("GEMINI_SCENARIO_MODEL") or None
+    llm = make_llm(temperature=0, model_name=model_name)
 
     system_msg = SystemMessage(content=_SYSTEM_PROMPT)
     human_msg = HumanMessage(content=_build_human_message(pr_data, app))

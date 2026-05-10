@@ -4,9 +4,9 @@
 This repository is a product-agnostic Agentic Test Explorer Proof-of-Concept (PoC). It performs
 automated, autonomous exploratory QA against any web application configured by the user. It runs
 on an async Python runtime utilizing a LangGraph supervisor-worker swarm architecture, Playwright
-for browser automation, and Gemini models. Application-specific details (URL, credentials,
-auth selectors, MCP servers, Skills) are supplied through `config.yaml`, `.env`, and
-`mcp_servers.json` — none are baked into the codebase.
+for browser automation, and Claude (default) or Gemini models. Application-specific details
+(URL, credentials, auth selectors, MCP servers, Skills) are supplied through `config.yaml`,
+`.env`, and `mcp_servers.json` — none are baked into the codebase.
 
 The framework also supports **PR-driven test generation**: given a GitHub Pull Request URL, it
 extracts the code diff (preferring the **GitHub MCP server** at
@@ -51,8 +51,8 @@ execution:
      to concurrent `gh` CLI subprocess calls.
    - Truncates diffs exceeding 100K chars.
 3. `generate_missions_from_pr()` — assembles the PR data and app context into a structured
-   prompt, calls Gemini, parses the YAML response, validates the mission structure, and
-   retries on parse failures or transient API errors.
+   prompt, calls the configured LLM (Claude or Gemini), parses the YAML response, validates
+   the mission structure, and retries on parse failures or transient API errors.
 
 The generated missions follow the standard YAML format and are routed to agents via the same
 `thread_id`-keyword mechanism. Thread IDs use the convention `pr_{number}_{agenttype}_{nn}`.
@@ -82,12 +82,20 @@ The generated missions follow the standard YAML format and are routed to agents 
 The framework is configured through three user-supplied files (templates ship as
 `*.example`):
 
-* **`.env`** — required env vars: `GOOGLE_API_KEY`, `APP_URL`, `APP_USERNAME`, `APP_PASSWORD`.
-  Optional: `APP_CONFIG`, `MCP_SERVERS_CONFIG`, `AGENT_SKILLS_ROOT`, `AGENT_SKILL_SCRIPT_TIMEOUT`,
-  `GEMINI_SCENARIO_MODEL` (overrides the model used for PR scenario generation).
+* **`.env`** — `APP_URL`, `APP_USERNAME`, `APP_PASSWORD` are required.
+  **LLM auth** — the framework supports Claude (default) and Gemini. Claude auth: set
+  `ANTHROPIC_API_KEY` (direct API), or the framework reads `~/.claude/settings.json`
+  for Vertex AI config automatically. Gemini auth: set `GOOGLE_API_KEY` (API key), or
+  leave it unset and the framework loads `~/.gemini/oauth_creds.json` (produced by
+  `gemini auth login`). Set `LLM_PROVIDER` to force a specific provider.
+  Optional: `APP_CONFIG`, `MCP_SERVERS_CONFIG`, `AGENT_SKILLS_ROOT`,
+  `AGENT_SKILL_SCRIPT_TIMEOUT`, `CLAUDE_MODEL`, `CLAUDE_VISION_MODEL`,
+  `CLAUDE_REPORT_MODEL`, `CLAUDE_SCENARIO_MODEL`, `GEMINI_MODEL`, `GEMINI_VISION_MODEL`,
+  `GEMINI_REPORT_MODEL`, `GEMINI_SCENARIO_MODEL`.
 * **`config.yaml`** (loaded by `src/agentic_explorer/config.py`) — `app.{name,url,description}`,
-  `auth.{method,selectors,post_login_check}`, `paths.{mcp_servers,skills_root}`. Supports
-  `${ENV_VAR}` interpolation.
+  `auth.{method,selectors,post_login_check}`, `paths.{mcp_servers,skills_root}`,
+  `llm.{provider,claude_model,gemini_model,claude_vision_model,gemini_vision_model}`.
+  Supports `${ENV_VAR}` interpolation.
 * **`mcp_servers.json`** — Claude-Desktop-compatible MCP server map. Optional; agents run
   without MCP tools if missing or empty. A `"github"` entry enables MCP-based PR data
   fetching (preferred over `gh` CLI):
@@ -113,15 +121,16 @@ The framework is configured through three user-supplied files (templates ship as
   skills installed under `AGENT_SKILLS_ROOT`, following the
   [agentskills.io](https://agentskills.io/specification) progressive-disclosure model.
 * **Vision & Screenshots**: The screenshot tool captures full-page bug evidence and is
-  thread-aware via `RunnableConfig`. The `analyze_visual_state` tool uses the Gemini vision
-  model to validate UI rendering.
+  thread-aware via `RunnableConfig`. The `analyze_visual_state` tool uses the configured
+  AI vision model (Claude or Gemini) to validate UI rendering.
 
 ## Running the System
 
 ### Initial Setup
 1. **Install dependencies**: `pip install -r requirements.txt` (or `uv sync`). Key packages:
-   `langchain`, `langchain-google-genai`, `langgraph`, `playwright`, `python-dotenv`, `pyyaml`,
-   `pillow`, `langchain-mcp-adapters`, `langgraph-checkpoint-sqlite`, `aiosqlite`, `httpx`.
+   `langchain`, `langchain-anthropic`, `langchain-google-genai`, `langchain-google-vertexai`,
+   `langgraph`, `playwright`, `python-dotenv`, `pyyaml`, `pillow`, `langchain-mcp-adapters`,
+   `langgraph-checkpoint-sqlite`, `aiosqlite`, `httpx`.
 2. **Install browser**: Run `playwright install chromium`.
 3. **Configure**: Copy `.env.example` → `.env`, `config.yaml.example` → `config.yaml`, and
    (optionally) `mcp_servers.json.example` → `mcp_servers.json`. Fill in your app's URL,
@@ -131,6 +140,7 @@ The framework is configured through three user-supplied files (templates ship as
 ### Developer Workflows
 Execute missions defined in YAML format (see `missions/README.md`):
 * **Standard Run**: `agent-explorer --missions missions/smoke.yaml`
+* **Explicit Provider**: `agent-explorer --missions missions/smoke.yaml --provider claude`
 * **Headed Mode** (Debugging): `agent-explorer --missions missions/smoke.yaml --headed`
 * **Clear Memory**: `agent-explorer --missions missions/smoke.yaml --clear-memory`
 * **Custom Step Limit**: `agent-explorer --missions missions/smoke.yaml --max-steps 50`
@@ -175,9 +185,17 @@ Every mission generates artifacts localized in a `report_<thread_id>/` directory
   `src/agentic_explorer/pr_analyzer.py` (`_SYSTEM_PROMPT`). When adding a new agent type,
   also add its description to this prompt so the LLM can route PR changes to it. Generated
   thread IDs must follow `pr_{number}_{agenttype}_{nn}` and respect `ADVANCED_KEYWORDS`.
-* **LLM Configuration**: The system defaults to `gemini-3.1-flash-lite` with `temperature=0` for
-  reasoning, vision, report generation, and PR scenario generation. Override models via
-  `GEMINI_MODEL`, `GEMINI_REPORT_MODEL`, `GEMINI_VISION_MODEL`, or `GEMINI_SCENARIO_MODEL`.
+* **LLM Configuration**: The system supports Claude (default) and Gemini providers. The
+  provider is auto-detected from credentials or set explicitly via `LLM_PROVIDER` env var,
+  `--provider` CLI flag, or `config.yaml > llm.provider`. Smart model defaults are chosen
+  per auth method (see `.env.example`). Override models via `CLAUDE_MODEL`,
+  `CLAUDE_VISION_MODEL`, `CLAUDE_REPORT_MODEL`, `CLAUDE_SCENARIO_MODEL` (Claude) or
+  `GEMINI_MODEL`, `GEMINI_VISION_MODEL`, `GEMINI_REPORT_MODEL`, `GEMINI_SCENARIO_MODEL`
+  (Gemini). The LLM is instantiated through `make_llm()` in
+  `src/agentic_explorer/utils/llm.py` — never construct `ChatAnthropic`,
+  `ChatAnthropicVertex`, or `ChatGoogleGenerativeAI` directly anywhere in the codebase.
+  The function accepts optional `model_name` and `provider` parameters for callers that
+  need a specific model or provider override.
 * **Tool Outputs**: Keep tool outputs as machine-consumable strings or JSON, as many agent
   prompts expect parseable responses.
 * **App-Specific Details**: NEVER hardcode application URLs, credentials, selectors, MCP

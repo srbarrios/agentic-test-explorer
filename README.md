@@ -5,11 +5,12 @@ explores, tests, and validates **any** web application. Configure it for your st
 small `config.yaml`, point it at your app, and let specialized agents drive a real browser
 to find bugs, render anomalies, and unscripted edge cases.
 
-Powered by a **LangGraph Swarm** architecture, **Playwright**, and **Google Gemini**, this
-framework dynamically routes tasks to UI-pattern specialists, visually validates complex
-charts, self-heals from UI errors, optionally consults user-provided MCP servers and Agent
-Skills for domain knowledge, generates reproducible Playwright test scripts from every bug
-found, and writes Markdown executive test reports.
+Powered by a **LangGraph Swarm** architecture, **Playwright**, and your choice of
+**Claude** (default) or **Google Gemini**, this framework dynamically routes tasks to
+UI-pattern specialists, visually validates complex charts, self-heals from UI errors,
+optionally consults user-provided MCP servers and Agent Skills for domain knowledge,
+generates reproducible Playwright test scripts from every bug found, and writes Markdown
+executive test reports.
 
 It can also **analyze GitHub Pull Requests** — pass a PR URL and the framework extracts the
 code diff, feeds it to an LLM, and auto-generates targeted test missions covering the UI
@@ -60,7 +61,7 @@ graph TD
     subgraph Integrations [External Integrations]
         Tools -->|JSON Intents / Action Tape| Engine[Browser Engine]:::external
         Engine -->|Playwright| PW[Chromium]:::external
-        Tools -->|Visual Validation| Vision[Gemini Vision]:::external
+        Tools -->|Visual Validation| Vision[AI Vision]:::external
         Tools -->|Optional Docs/Knowledge| MCP[User-configured MCP Servers]:::external
         Tools -->|Optional Skills| Skills[User-installed Agent Skills]:::external
         Tools -->|UI under test| WebApp[Your Web Application]:::external
@@ -91,8 +92,8 @@ graph TD
      (`report_<thread_id>/action_tape.jsonl`).
    - On bug detection, `generate_reproduction_spec` translates the tape into a runnable
      `reproduction_*.spec.ts` Playwright test.
-4. **Tool Modality**: Agents receive (1) the deterministic browser engine, (2) Gemini Vision
-   for perceptual validation, (3) any **MCP servers you configure** in
+4. **Tool Modality**: Agents receive (1) the deterministic browser engine, (2) AI Vision
+   (Claude or Gemini) for perceptual validation, (3) any **MCP servers you configure** in
    `mcp_servers.json`, and (4) any **Agent Skills** installed under `AGENT_SKILLS_ROOT`.
    The framework ships zero hardcoded MCP servers or skills — bring your own.
 5. **State & Memory (`agent_memory.sqlite`)**: An asynchronous SQLite checkpointer
@@ -106,6 +107,11 @@ graph TD
   server preferred, `gh` CLI fallback)
 - `src/agentic_explorer/auth_setup.py` — generic login flow that saves `auth.json`
 - `src/agentic_explorer/config.py` — `config.yaml` loader (with `${ENV}` interpolation)
+- `src/agentic_explorer/utils/llm.py` — `make_llm()` multi-provider factory; supports
+  Claude (API key / Vertex AI) and Gemini (API key / OAuth) with auto-detection
+- `src/agentic_explorer/utils/llm_json.py` — YAML/JSON extraction helpers for LLM responses
+- `src/agentic_explorer/orchestration/graph_base.py` — shared graph infrastructure
+  (`AgentState`, node factories, tool filtering)
 - `src/agentic_explorer/orchestration/standard_graph.py` — 5 UI-pattern specialist agents
 - `src/agentic_explorer/orchestration/advanced_graph.py` — autonomous explorer agent
 - `src/agentic_explorer/tools/browser/engine.py` — Record-and-Translate browser engine
@@ -128,7 +134,7 @@ graph TD
 * **Self-Healing Browser Execution**: Playwright actions are wrapped to catch uncaught
   exceptions. Errors are returned as natural language so agents can adapt strategies.
 * **Visual Validation**: Agents can take screenshots of complex Canvas/SVG elements and
-  use Gemini Vision to analyze them for rendering anomalies.
+  use AI vision (Claude or Gemini) to analyze them for rendering anomalies.
 * **Bring-Your-Own MCP**: Plug in any MCP servers via a standard
   `mcp_servers.json` — agents query them for domain knowledge instead of guessing.
 * **Bring-Your-Own Skills**: Install Agent Skills (per the
@@ -165,11 +171,34 @@ playwright install chromium
 
 ### 2. Environment Variables
 
-Copy `.env.example` → `.env` and fill in your values:
+Copy `.env.example` → `.env` and fill in your values. The framework supports two LLM
+providers — **Claude** (default) and **Gemini** — and auto-detects which to use from
+available credentials.
 
 ```env
-GOOGLE_API_KEY="your_gemini_api_key_here"
+# --- LLM Provider (optional — auto-detected from credentials if not set) ---
+# LLM_PROVIDER="claude"         # or: gemini
 
+# --- Claude authentication (default provider — choose one) ---
+
+# Option A: Direct API key
+ANTHROPIC_API_KEY="your_anthropic_api_key_here"
+
+# Option B: Vertex AI (zero config if you already use Claude Code)
+# The framework reads ~/.claude/settings.json automatically. If it contains
+# CLAUDE_CODE_USE_VERTEX=1 and ANTHROPIC_VERTEX_PROJECT_ID, Claude on Vertex
+# AI is used with no additional setup.
+
+# --- Gemini authentication (alternative provider — choose one) ---
+
+# Option A: API key
+# GOOGLE_API_KEY="your_gemini_api_key_here"
+
+# Option B: OAuth credentials (no env var needed)
+# If GOOGLE_API_KEY is not set, the framework loads ~/.gemini/oauth_creds.json
+# produced by: gemini auth login
+
+# --- Application under test ---
 APP_URL="https://your-app.example.com"
 APP_USERNAME="your_user"
 APP_PASSWORD="your_password"
@@ -179,10 +208,27 @@ MCP_SERVERS_CONFIG="./mcp_servers.json"
 
 AGENT_SKILLS_ROOT="./agent-skills"
 AGENT_SKILL_SCRIPT_TIMEOUT="60"
-
-# Optional: Override the model used for PR scenario generation (defaults to GEMINI_MODEL)
-# GEMINI_SCENARIO_MODEL="gemini-2.5-pro"
 ```
+
+**Provider auto-detection order** (when `LLM_PROVIDER` is not set):
+
+| Priority | Credential Source | Provider |
+|----------|-------------------|----------|
+| 1 | `ANTHROPIC_API_KEY` env var | Claude (direct API) |
+| 2 | `~/.claude/settings.json` with `CLAUDE_CODE_USE_VERTEX=1` | Claude (Vertex AI) |
+| 3 | `GOOGLE_API_KEY` env var | Gemini (API key) |
+| 4 | `~/.gemini/oauth_creds.json` | Gemini (OAuth) |
+
+**Smart model defaults** — the framework picks the best model for your auth method:
+
+| Auth Method | Default Model | Rationale |
+|-------------|---------------|-----------|
+| Claude API key | `claude-haiku-4-5` | Fast, economical |
+| Claude Vertex AI | `claude-sonnet-4-6` | GCP billing, higher capability |
+| Gemini API key | `gemini-2.5-flash` | Fast, economical |
+| Gemini OAuth | `gemini-2.5-pro` | Subscription, use best |
+
+Override models via env vars (`CLAUDE_MODEL`, `GEMINI_MODEL`) or in `config.yaml` (see below).
 
 ### 3. App Configuration
 
@@ -205,6 +251,12 @@ auth:
 paths:
   mcp_servers: ./mcp_servers.json
   skills_root: ./agent-skills
+
+# LLM provider (optional — auto-detected from credentials by default)
+llm:
+  # provider: claude              # or: gemini
+  # claude_model: claude-sonnet-4-6
+  # gemini_model: gemini-2.5-flash
 ```
 
 ### 4. (Optional) MCP Servers
@@ -270,8 +322,12 @@ them in for your application before running.
 ### Running Missions from YAML
 
 ```bash
-# Standard 5-agent UI swarm
+# Standard 5-agent UI swarm (uses auto-detected provider — Claude by default)
 agent-explorer --missions missions/smoke.yaml
+
+# Explicitly choose a provider
+agent-explorer --missions missions/smoke.yaml --provider claude
+agent-explorer --missions missions/smoke.yaml --provider gemini
 
 # Autonomous exploration (visible browser recommended)
 agent-explorer --missions missions/autonomous_exploration.yaml --headed

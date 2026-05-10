@@ -14,3 +14,24 @@ auth:
 paths:
   mcp_servers: ./mcp_servers.json
   skills_root: ./agent-skills
+
+# LLM provider configuration (optional — auto-detected from credentials by default)
+# Supported providers: "claude" (default) | "gemini"
+#
+# When not set, the framework auto-detects in this order:
+#   1. ANTHROPIC_API_KEY env var → Claude (direct API)
+#   2. ~/.claude/settings.json with CLAUDE_CODE_USE_VERTEX=1 → Claude (Vertex AI)
+#   3. GOOGLE_API_KEY env var → Gemini (API key)
+#   4. ~/.gemini/oauth_creds.json → Gemini (OAuth)
+#
+# Smart model defaults per auth method:
+#   Claude API key     → claude-haiku-4-5     (fast, economical)
+#   Claude Vertex AI   → claude-sonnet-4-6    (GCP billing, higher capability)
+#   Gemini API key     → gemini-2.5-flash     (fast, economical)
+#   Gemini OAuth       → gemini-2.5-pro       (subscription, use best)
+llm:
+  # provider: claude
+  # claude_model: claude-sonnet-4-6
+  # claude_vision_model: claude-haiku-4-5
+  # gemini_model: gemini-2.5-flash
+  # gemini_vision_model: gemini-2.5-flash

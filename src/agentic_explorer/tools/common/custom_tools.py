@@ -14,7 +14,6 @@ from typing import Optional, Union
 from PIL import Image
 
 from langchain_core.tools import tool
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from playwright.async_api import Page
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -24,9 +23,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Vision Model Setup ---
-_VISION_MODEL_NAME = os.getenv("GEMINI_VISION_MODEL", os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"))
+_provider = os.getenv("LLM_PROVIDER", "").lower()
+_VISION_MODEL_NAME = (
+    os.getenv("CLAUDE_VISION_MODEL") if _provider == "claude"
+    else os.getenv("GEMINI_VISION_MODEL") or os.getenv("GEMINI_MODEL")
+) or None
 try:
-    vision_model = ChatGoogleGenerativeAI(model=_VISION_MODEL_NAME, temperature=0)
+    from agentic_explorer.utils.llm import make_llm
+    vision_model = make_llm(temperature=0, model_name=_VISION_MODEL_NAME)
 except Exception as e:
     print(f"Error initializing vision model: {e}")
     vision_model = None

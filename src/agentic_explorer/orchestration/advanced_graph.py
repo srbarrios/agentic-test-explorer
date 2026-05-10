@@ -9,9 +9,7 @@ specialized agents (custom fuzzers, integrity auditors, etc.) can be added
 without restructuring the graph.
 """
 
-import os
 from langchain_core.messages import SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph
 from langchain.agents import create_agent
 from playwright.async_api import Page
@@ -28,6 +26,7 @@ from agentic_explorer.orchestration.graph_base import (
     filter_base_tools,
     make_agent_node,
     make_supervisor_node,
+    make_llm,
     compile_swarm,
 )
 
@@ -46,8 +45,7 @@ def build_advanced_graph(base_tools: list, active_page: Page, checkpointer, app:
         app: App metadata (name, url, description) injected into agent prompts.
         max_steps: Supervisor reset threshold.
     """
-    model_name = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
-    llm = ChatGoogleGenerativeAI(model=model_name, temperature=0)
+    llm = make_llm(temperature=0)
 
     app_url = app.url
     app_name = app.name or "the application"

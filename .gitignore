@@ -6,6 +6,8 @@ agent_memory.*
 auth.json
 .idea
 .claude
+config.yaml
+mcp_servers.json
 
 # Python build artifacts
 *.egg-info/
