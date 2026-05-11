@@ -149,11 +149,11 @@ The framework is configured through three user-supplied files (templates ship as
 
 ### Developer Workflows
 Execute missions defined in YAML format (see `missions/README.md`):
-* **Standard Run**: `agent-explorer --missions missions/smoke.yaml`
-* **Explicit Provider**: `agent-explorer --missions missions/smoke.yaml --provider claude`
-* **Headed Mode** (Debugging): `agent-explorer --missions missions/smoke.yaml --headed`
-* **Clear Memory**: `agent-explorer --missions missions/smoke.yaml --clear-memory`
-* **Custom Step Limit**: `agent-explorer --missions missions/smoke.yaml --max-steps 50`
+* **Standard Run**: `agent-explorer --missions missions/listing_agent.yaml`
+* **Explicit Provider**: `agent-explorer --missions missions/listing_agent.yaml --provider claude`
+* **Headed Mode** (Debugging): `agent-explorer --missions missions/listing_agent.yaml --headed`
+* **Clear Memory**: `agent-explorer --missions missions/listing_agent.yaml --clear-memory`
+* **Custom Step Limit**: `agent-explorer --missions missions/listing_agent.yaml --max-steps 50`
   (default: 30; supervisor resets to the app homepage on limit and tries a new strategy)
 
 PR-driven test generation (prefers GitHub MCP server; falls back to [`gh` CLI](https://cli.github.com/)):
@@ -161,7 +161,7 @@ PR-driven test generation (prefers GitHub MCP server; falls back to [`gh` CLI](h
   — writes `missions/pr_123.yaml`
 * **Generate + Execute**: `agent-explorer --pr-url https://github.com/org/repo/pull/123 --execute --headed`
 * **Custom Output Dir**: `agent-explorer --pr-url <url> --output-dir ./pr-missions`
-* **Combined**: `agent-explorer --missions missions/smoke.yaml --pr-url <url> --execute`
+* **Combined**: `agent-explorer --missions missions/listing_agent.yaml --pr-url <url> --execute`
   — runs both hand-written and auto-generated missions
 
 ## Output Artifacts
