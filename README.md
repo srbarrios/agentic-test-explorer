@@ -7,7 +7,7 @@ to find bugs, render anomalies, and unscripted edge cases.
 
 Powered by a **LangGraph Swarm** architecture, **Playwright**, and your choice of
 **Claude** (default) or **Google Gemini**, this framework dynamically routes tasks to
-UI-pattern specialists, visually validates complex charts, self-heals from UI errors,
+behavioral QA personas and advanced stress/exploration agents, self-heals from UI errors,
 optionally consults user-provided MCP servers and Agent Skills for domain knowledge,
 generates reproducible Playwright test scripts from every bug found, and writes Markdown
 executive test reports.
@@ -44,23 +44,17 @@ graph TD
     Main -->|Checkpoints| DB[(SQLite Memory)]:::db
 
     subgraph SQA [Standard QA Swarm]
-        S_Supervisor <-->|Routes & Returns| S_List([Listing Agent]):::agent
-        S_Supervisor <--> S_Graph([Graph Agent]):::agent
-        S_Supervisor <--> S_Chart([Chart Agent]):::agent
-        S_Supervisor <--> S_Map([Map Agent]):::agent
-        S_Supervisor <--> S_Form([Form Agent]):::agent
-        S_Supervisor <--> S_New([New User Agent]):::agent
+        S_Supervisor <-->|Routes & Returns| S_New([New User Agent]):::agent
         S_Supervisor <--> S_Power([Power User Agent]):::agent
         S_Supervisor <--> S_Adv([Adversarial User Agent]):::agent
-        S_Supervisor <--> S_Imp([Impatient User Agent]):::agent
-        S_Supervisor <--> S_Acc([Accessibility User Agent]):::agent
-        S_Supervisor <--> S_Con([Constrained User Agent]):::agent
-        S_Supervisor <--> S_Data([Data Heavy User Agent]):::agent
-        S_Supervisor <--> S_Ret([Returning User Agent]):::agent
     end
 
     subgraph ATS [Advanced Testing Swarm]
-        A_Supervisor <-->|Routes & Returns| A_Explorer([Explorer Agent]):::agent
+        A_Supervisor <-->|Routes & Returns| A_Acc([Accessibility User Agent]):::agent
+        A_Supervisor <--> A_Data([Data Heavy User Agent]):::agent
+        A_Supervisor <--> A_Imp([Impatient User Agent]):::agent
+        A_Supervisor <--> A_Ret([Returning User Agent]):::agent
+        A_Supervisor <--> A_Explorer([Explorer Agent]):::agent
     end
 
     SQA --> Tools[[Tools & APIs]]:::tool
@@ -69,7 +63,6 @@ graph TD
     subgraph Integrations [External Integrations]
         Tools -->|JSON Intents / Action Tape| Engine[Browser Engine]:::external
         Engine -->|Playwright| PW[Chromium]:::external
-        Tools -->|Visual Validation| Vision[AI Vision]:::external
         Tools -->|Optional Docs/Knowledge| MCP[User-configured MCP Servers]:::external
         Tools -->|Optional Skills| Skills[User-installed Agent Skills]:::external
         Tools -->|UI under test| WebApp[Your Web Application]:::external
@@ -84,9 +77,10 @@ graph TD
 
 1. **Mission Dispatcher (`main.py`)**: Loads `missions/*.yaml` files and provisions the
    correct graph network based on `thread_id` naming conventions
-   (`explorer` / `chaos` / `autonomous` route to the advanced graph; everything else to the
-   standard 13-agent swarm). Can also accept a `--pr-url` to auto-generate missions from a
-   GitHub Pull Request via `pr_analyzer.py`.
+   (`accessibility`, `data_heavy`, `impatient`, `returning`, `explorer`, `chaos`, or
+   `autonomous` route to the advanced graph; everything else to the standard 3-persona
+   swarm). Can also accept a `--pr-url` to auto-generate missions from a GitHub Pull
+   Request via `pr_analyzer.py`.
 2. **Supervisor-Worker Flow**: A Supervisor node dynamically evaluates the workspace state
    and dispatches control to specialized worker nodes.
 3. **Record-and-Translate Browser Engine** (`src/agentic_explorer/tools/browser/engine.py`):
@@ -100,8 +94,8 @@ graph TD
      (`report_<thread_id>/action_tape.jsonl`).
    - On bug detection, `generate_reproduction_spec` translates the tape into a runnable
      `reproduction_*.spec.ts` Playwright test.
-4. **Tool Modality**: Agents receive (1) the deterministic browser engine, (2) AI Vision
-   (Claude or Gemini) for perceptual validation, (3) any **MCP servers you configure** in
+4. **Tool Modality**: Agents receive (1) the deterministic browser engine, (2) screenshot
+   capture and reproduction-generation tools, (3) any **MCP servers you configure** in
    `mcp_servers.json`, and (4) any **Agent Skills** installed under `AGENT_SKILLS_ROOT`.
    The framework ships zero hardcoded MCP servers or skills — bring your own.
 5. **State & Memory (`agent_memory.sqlite`)**: An asynchronous SQLite checkpointer
@@ -120,10 +114,10 @@ graph TD
 - `src/agentic_explorer/utils/llm_json.py` — YAML/JSON extraction helpers for LLM responses
 - `src/agentic_explorer/orchestration/graph_base.py` — shared graph infrastructure
   (`AgentState`, node factories, tool filtering)
-- `src/agentic_explorer/orchestration/standard_graph.py` — 13 standard QA agents (5 specialists, 8 personas)
-- `src/agentic_explorer/orchestration/advanced_graph.py` — autonomous explorer agent
+- `src/agentic_explorer/orchestration/standard_graph.py` — 3 standard QA personas
+- `src/agentic_explorer/orchestration/advanced_graph.py` — 4 advanced personas plus autonomous explorer
 - `src/agentic_explorer/tools/browser/engine.py` — Record-and-Translate browser engine
-- `src/agentic_explorer/tools/common/custom_tools.py` — vision, screenshot, MCP loader,
+- `src/agentic_explorer/tools/common/custom_tools.py` — screenshot, MCP loader,
   Skills tools
 
 ---
@@ -131,8 +125,8 @@ graph TD
 ## ✨ Key Features
 
 * **Product-Agnostic**: One small `config.yaml` adapts the framework to any web app.
-* **UI-Pattern Specialist & Persona Agents**: Thirteen standard QA agents (UI-pattern specialists and behavioral personas)
-  + an autonomous explorer — each prompted around a specific testing strategy.
+* **Persona-Driven QA Agents**: Three standard QA personas plus five advanced agents —
+  each prompted around a specific testing strategy.
 * **Record-and-Translate Engine**: Agents emit JSON intents, the deterministic engine
   executes and records every step to an immutable Action Tape. Every bug automatically
   generates a reproducible `reproduction_*.spec.ts` Playwright script.
@@ -141,8 +135,8 @@ graph TD
   `data-test-subj` → `aria-label` → visible text priority.
 * **Self-Healing Browser Execution**: Playwright actions are wrapped to catch uncaught
   exceptions. Errors are returned as natural language so agents can adapt strategies.
-* **Visual Validation**: Agents can take screenshots of complex Canvas/SVG elements and
-  use AI vision (Claude or Gemini) to analyze them for rendering anomalies.
+* **Screenshot Evidence**: Agents capture full-page screenshots when bugs or anomalies are
+  detected, then generate reproducible Playwright specs from the Action Tape.
 * **Bring-Your-Own MCP**: Plug in any MCP servers via a standard
   `mcp_servers.json` — agents query them for domain knowledge instead of guessing.
 * **Bring-Your-Own Skills**: Install Agent Skills (per the
@@ -335,12 +329,16 @@ your app's login form.
 ### Defining Missions
 
 Missions live in `missions/*.yaml`. See [`missions/README.md`](missions/README.md) for the
-schema and writing guide. Fourteen templates ship in the repo, one for each defined agent persona:
+schema and writing guide. Eight templates ship in the repo, one for each supported agent:
 
-- [`missions/listing_agent.yaml`](missions/listing_agent.yaml)
-- [`missions/form_agent.yaml`](missions/form_agent.yaml)
+- [`missions/new_user_agent.yaml`](missions/new_user_agent.yaml)
+- [`missions/power_user_agent.yaml`](missions/power_user_agent.yaml)
+- [`missions/adversarial_user_agent.yaml`](missions/adversarial_user_agent.yaml)
+- [`missions/accessibility_user_agent.yaml`](missions/accessibility_user_agent.yaml)
+- [`missions/data_heavy_user_agent.yaml`](missions/data_heavy_user_agent.yaml)
+- [`missions/impatient_user_agent.yaml`](missions/impatient_user_agent.yaml)
+- [`missions/returning_user_agent.yaml`](missions/returning_user_agent.yaml)
 - [`missions/explorer_agent.yaml`](missions/explorer_agent.yaml)
-- etc.
 
 All of them contain placeholders (`<YOUR_APP>`, `<APP_URL>`, `<example_search_term>`, …) — fill
 them in for your application before running.
@@ -348,24 +346,27 @@ them in for your application before running.
 ### Running Missions from YAML
 
 ```bash
-# Standard 13-agent QA swarm (uses auto-detected provider — Claude by default)
-agent-explorer --missions missions/listing_agent.yaml
+# Standard 3-persona QA swarm (uses auto-detected provider — Claude by default)
+agent-explorer --missions missions/new_user_agent.yaml
 
 # Explicitly choose a provider
-agent-explorer --missions missions/form_agent.yaml --provider claude
-agent-explorer --missions missions/form_agent.yaml --provider gemini
+agent-explorer --missions missions/power_user_agent.yaml --provider claude
+agent-explorer --missions missions/power_user_agent.yaml --provider gemini
+
+# Advanced persona mission
+agent-explorer --missions missions/accessibility_user_agent.yaml --headed
 
 # Autonomous exploration (visible browser recommended)
 agent-explorer --missions missions/explorer_agent.yaml --headed
 
 # Clear agent memory to restart fresh
-agent-explorer --missions missions/listing_agent.yaml --clear-memory
+agent-explorer --missions missions/new_user_agent.yaml --clear-memory
 
 # Override the supervisor step limit (default: 30)
-agent-explorer --missions missions/listing_agent.yaml --max-steps 50
+agent-explorer --missions missions/new_user_agent.yaml --max-steps 50
 
 # Suppress verbose ReAct console output (traces.log still captures everything)
-agent-explorer --missions missions/listing_agent.yaml --quiet
+agent-explorer --missions missions/new_user_agent.yaml --quiet
 ```
 
 ### PR-Driven Test Generation
@@ -388,14 +389,14 @@ agent-explorer --pr-url https://github.com/org/repo/pull/123 --execute --headed
 agent-explorer --pr-url https://github.com/org/repo/pull/123 --output-dir ./pr-missions
 
 # Combine with existing missions
-agent-explorer --missions missions/listing_agent.yaml --pr-url https://github.com/org/repo/pull/123 --execute
+agent-explorer --missions missions/new_user_agent.yaml --pr-url https://github.com/org/repo/pull/123 --execute
 ```
 
 The analyzer extracts the PR title, description, file list, and full code diff, then sends
 them along with the app context from `config.yaml` to an LLM. The LLM maps the changes to
-the agent specializations (listing, graph, chart, map, form, explorer) and generates 3-8
-targeted missions with specific, actionable prompts. Generated mission files follow the same
-YAML format as hand-written ones and can be re-run later with `--missions`.
+the remaining standard and advanced personas and generates 3-8 targeted missions with
+specific, actionable prompts. Generated mission files follow the same YAML format as
+hand-written ones and can be re-run later with `--missions`.
 
 ---
 

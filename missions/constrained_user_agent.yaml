@@ -1,8 +1,0 @@
-missions:
-- thread_id: test_constrained_user_01
-  prompt: 'Persona: constrained_user_agent
-
-
-    Simulate constrained network/viewport conditions at <APP_URL>. Test responsive
-    layout behavior at <mobile_viewport_size>. Verify UI elements don''t overlap,
-    and check how the app handles delayed component loading.'

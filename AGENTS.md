@@ -36,7 +36,8 @@ Supported JSON actions: `navigate`, `click`, `fill`, `press`, `select_option`, `
 
 ### Agent Types
 `main.py` automatically compiles either a standard or advanced graph based on `thread_id`
-keywords (`explorer`, `chaos`, `autonomous` → advanced; everything else → standard).
+keywords (`accessibility`, `a11y`, `data_heavy`, `data-heavy`, `impatient`, `returning`,
+`explorer`, `chaos`, `autonomous` → advanced; everything else → standard).
 
 ### PR-Driven Scenario Generation
 `src/agentic_explorer/pr_analyzer.py` provides a pipeline that sits **before** mission
@@ -57,35 +58,25 @@ execution:
 The generated missions follow the standard YAML format and are routed to agents via the same
 `thread_id`-keyword mechanism. Thread IDs use the convention `pr_{number}_{agenttype}_{nn}`.
 
-* **Standard QA Agents** (`src/agentic_explorer/orchestration/standard_graph.py`): Thirteen agents available for routing by the supervisor:
-  * **5 UI-pattern specialists**: Tools are split by modality (DOM-only vs. visual validation).
-    * `listing_agent` (DOM tools) — lists, tables, search/filter bars, pagination, row flyouts.
-    * `graph_agent` (DOM + visual) — node-link graphs, timelines, waterfalls, complex SVG/Canvas.
-    * `chart_agent` (DOM + visual) — time-series, bar/line/area charts, KPI tiles, dashboards.
-    * `map_agent` (DOM + visual) — geographic maps, status grids, geospatial overlays.
-    * `form_agent` (DOM tools) — forms, wizards, validation flows, multi-step configuration.
-  * **8 Generic Exploration Personas**: These personas apply behavioral strategies to the application.
-    * `new_user_agent` — tests onboarding flows, discoverability, default states, and empty states.
-    * `power_user_agent` — uses keyboard shortcuts, bulk operations, advanced filters, edge-case workflows.
-    * `adversarial_user_agent` — deliberately tries to break things (invalid inputs, back-button abuse).
-    * `impatient_user_agent` — cancels operations mid-flight, refreshes during submissions, clicks buttons multiple times.
-    * `accessibility_user_agent` — validates WCAG compliance, screen reader navigation, keyboard-only interaction.
-    * `constrained_user_agent` — tests degraded-experience paths and responsive design for slow networks and small viewports.
-    * `data_heavy_user_agent` — uploads large files, creates thousands of records, uses long strings.
-    * `returning_user_agent` — scenarios for returning users with stale sessions, cached pages, outdated bookmarks.
+* **Standard QA Agents** (`src/agentic_explorer/orchestration/standard_graph.py`): Three agents available for routing by the supervisor:
+  * `new_user_agent` — tests onboarding flows, discoverability, default states, and empty states.
+  * `power_user_agent` — uses keyboard shortcuts, bulk operations, advanced filters, edge-case workflows.
+  * `adversarial_user_agent` — deliberately tries to break things (invalid inputs, back-button abuse).
 * **Advanced Testing Agents** (`src/agentic_explorer/orchestration/advanced_graph.py`):
-    * `explorer_agent` — autonomous chaos exploration; uses the full Record-and-Translate
-      engine. The advanced graph's single-agent supervisor is preserved as an extension point
-      for additional specialized agents.
+  * `accessibility_user_agent` — validates WCAG compliance, screen reader navigation, keyboard-only interaction.
+  * `data_heavy_user_agent` — uploads large files, creates thousands of records, uses long strings.
+  * `impatient_user_agent` — cancels operations mid-flight, refreshes during submissions, clicks buttons multiple times.
+  * `returning_user_agent` — scenarios for returning users with stale sessions, cached pages, outdated bookmarks.
+  * `explorer_agent` — autonomous chaos exploration; uses the full Record-and-Translate engine.
 
 ### State Management
 * **Persistent Memory**: State is persisted via an SQLite checkpointer (`agent_memory.sqlite`),
   keyed by the `thread_id`.
 * **Mission Isolation**: Each mission has a unique `thread_id` to isolate its memory; reusing a
   thread ID resumes the prior context.
-* **`AgentState` / `AdvancedAgentState`**: Both state TypedDicts carry `messages`,
-  `next_agent`, `step_count`, and `action_tape` (an append-only list of recorded browser
-  commands).
+* **`AgentState`**: A unified state `TypedDict` that carries `messages`,
+  `next_agent`, `step_count`, `action_tape` (an append-only list of recorded browser
+  commands), `bugs_found`, and `explored_paths`.
 
 ## Configuration Surface
 The framework is configured through three user-supplied files (templates ship as
@@ -98,9 +89,9 @@ The framework is configured through three user-supplied files (templates ship as
   leave it unset and the framework loads `~/.gemini/oauth_creds.json` (produced by
   `gemini auth login`). Set `LLM_PROVIDER` to force a specific provider.
   Optional: `APP_CONFIG`, `MCP_SERVERS_CONFIG`, `AGENT_SKILLS_ROOT`,
-  `AGENT_SKILL_SCRIPT_TIMEOUT`, `CLAUDE_MODEL`, `CLAUDE_VISION_MODEL`,
+  `AGENT_SKILL_SCRIPT_TIMEOUT`, `ANTHROPIC_VERTEX_REGION`, `CLAUDE_MODEL`, `CLAUDE_VISION_MODEL`,
   `CLAUDE_REPORT_MODEL`, `CLAUDE_SCENARIO_MODEL`, `GEMINI_MODEL`, `GEMINI_VISION_MODEL`,
-  `GEMINI_REPORT_MODEL`, `GEMINI_SCENARIO_MODEL`.
+  `GEMINI_REPORT_MODEL`, `GEMINI_SCENARIO_MODEL`, `SCENARIO_MODEL` (provider-agnostic).
 * **`config.yaml`** (loaded by `src/agentic_explorer/config.py`) — `app.{name,url,description}`,
   `auth.{method,selectors,post_login_check}`, `paths.{mcp_servers,skills_root}`,
   `llm.{provider,claude_model,gemini_model,claude_vision_model,gemini_vision_model}`.
@@ -129,14 +120,14 @@ The framework is configured through three user-supplied files (templates ship as
 * **Agent Skills** (`fetch_agent_skill`, `run_agent_skill_script`): Discover and execute
   skills installed under `AGENT_SKILLS_ROOT`, following the
   [agentskills.io](https://agentskills.io/specification) progressive-disclosure model.
-* **Vision & Screenshots**: The screenshot tool captures full-page bug evidence and is
-  thread-aware via `RunnableConfig`. The `analyze_visual_state` tool uses the configured
-  AI vision model (Claude or Gemini) to validate UI rendering.
+* **Screenshots & Reproductions**: The screenshot tool captures full-page bug evidence and
+  is thread-aware via `RunnableConfig`. The browser engine translates Action Tape entries
+  into reproducible Playwright specs.
 
 ## Running the System
 
 ### Initial Setup
-1. **Install dependencies**: `pip install -r requirements.txt` (or `uv pip install -r requirements.txt`).
+1. **Install dependencies**: `pip install -e .` (or `uv pip install -e .`).
    Re-run this after every `git pull` to pick up new or updated packages. Key packages:
    `langchain`, `langchain-anthropic`, `langchain-google-genai`, `langchain-google-vertexai`,
    `langgraph`, `playwright`, `python-dotenv`, `pyyaml`, `pillow`, `langchain-mcp-adapters`,
@@ -149,11 +140,11 @@ The framework is configured through three user-supplied files (templates ship as
 
 ### Developer Workflows
 Execute missions defined in YAML format (see `missions/README.md`):
-* **Standard Run**: `agent-explorer --missions missions/listing_agent.yaml`
-* **Explicit Provider**: `agent-explorer --missions missions/listing_agent.yaml --provider claude`
-* **Headed Mode** (Debugging): `agent-explorer --missions missions/listing_agent.yaml --headed`
-* **Clear Memory**: `agent-explorer --missions missions/listing_agent.yaml --clear-memory`
-* **Custom Step Limit**: `agent-explorer --missions missions/listing_agent.yaml --max-steps 50`
+* **Standard Run**: `agent-explorer --missions missions/new_user_agent.yaml`
+* **Explicit Provider**: `agent-explorer --missions missions/power_user_agent.yaml --provider claude`
+* **Headed Mode** (Debugging): `agent-explorer --missions missions/accessibility_user_agent.yaml --headed`
+* **Clear Memory**: `agent-explorer --missions missions/new_user_agent.yaml --clear-memory`
+* **Custom Step Limit**: `agent-explorer --missions missions/new_user_agent.yaml --max-steps 50`
   (default: 30; supervisor resets to the app homepage on limit and tries a new strategy)
 
 PR-driven test generation (prefers GitHub MCP server; falls back to [`gh` CLI](https://cli.github.com/)):
@@ -161,7 +152,7 @@ PR-driven test generation (prefers GitHub MCP server; falls back to [`gh` CLI](h
   — writes `missions/pr_123.yaml`
 * **Generate + Execute**: `agent-explorer --pr-url https://github.com/org/repo/pull/123 --execute --headed`
 * **Custom Output Dir**: `agent-explorer --pr-url <url> --output-dir ./pr-missions`
-* **Combined**: `agent-explorer --missions missions/listing_agent.yaml --pr-url <url> --execute`
+* **Combined**: `agent-explorer --missions missions/new_user_agent.yaml --pr-url <url> --execute`
   — runs both hand-written and auto-generated missions
 
 ## Output Artifacts
@@ -188,13 +179,14 @@ Every mission generates artifacts localized in a `report_<thread_id>/` directory
     * **Forbidden**: XPath (`//div`), positional CSS (`:nth-child(3)`,
       `div > span:nth-of-type(2)`). Always call `get_dom_snapshot` first.
 * **Agent Modification**: If adding a new agent, you must update the system prompt, tool
-  bundle, node wrapper function, supervisor enum, and conditional routing table.
+  bundle, agent registry, supervisor descriptions, and routing keywords when applicable.
 * **Mission Modifications**: If adding a new advanced mission category, update both the
   mission `thread_id` naming and the `ADVANCED_KEYWORDS` tuple in `main.py`.
 * **PR Analyzer Modifications**: The PR scenario generation prompt is in
   `src/agentic_explorer/pr_analyzer.py` (`_SYSTEM_PROMPT`). When adding a new agent type,
-  also add its description to this prompt so the LLM can route PR changes to it. Generated
-  thread IDs must follow `pr_{number}_{agenttype}_{nn}` and respect `ADVANCED_KEYWORDS`.
+  also add its description to this prompt and update PR mission validation so the LLM can
+  route PR changes to it. Generated thread IDs must follow `pr_{number}_{agenttype}_{nn}`
+  and respect `ADVANCED_KEYWORDS`.
 * **LLM Configuration**: The system supports Claude (default) and Gemini providers. The
   provider is auto-detected from credentials or set explicitly via `LLM_PROVIDER` env var,
   `--provider` CLI flag, or `config.yaml > llm.provider`. Smart model defaults are chosen

@@ -36,6 +36,33 @@ _PR_URL_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 
 MAX_DIFF_CHARS = 100_000
 
+_ALLOWED_PR_AGENT_KEYWORDS = (
+    "new_user",
+    "power_user",
+    "adversarial_user",
+    "accessibility_user",
+    "accessibility",
+    "a11y",
+    "data_heavy_user",
+    "data_heavy",
+    "data-heavy",
+    "impatient_user",
+    "impatient",
+    "returning_user",
+    "returning",
+    "explorer",
+    "chaos",
+    "autonomous",
+)
+_DELETED_PR_AGENT_KEYWORDS = (
+    "listing",
+    "graph",
+    "chart",
+    "map",
+    "form",
+    "constrained",
+)
+
 
 @dataclass
 class PRData:
@@ -338,23 +365,18 @@ _SYSTEM_PROMPT = """\
 You are a QA Test Architect. You analyze code changes in pull requests and generate \
 targeted test missions for an autonomous testing framework.
 
-The framework has 6 agent types, each specializing in specific UI patterns:
-- listing_agent: List views, search/filter, pagination, data tables, row details, flyouts
-- graph_agent: Node-link graphs, timelines, tree visualizations, SVG/Canvas renders
-- chart_agent: Charts, dashboards, KPI tiles, time-range pickers, gauge widgets
-- map_agent: Geographic maps, status grids, spatial overlays, marker clusters
-- form_agent: Forms, multi-step wizards, validation flows, configuration screens, input fields
-- explorer_agent (autonomous): Open-ended chaos testing, cross-feature integration, edge cases, regression sweeps (use thread_id containing "explorer" or "autonomous")
-
-In addition, it has 8 generic exploration personas that you can route to:
+The framework has 3 standard exploration personas:
 - new_user_agent: Tests onboarding flows, discoverability, default states, and empty states. Catches assumptions developers make about prior knowledge.
 - power_user_agent: Uses keyboard shortcuts, bulk operations, advanced filters, edge-case workflows. Pushes features to their limits.
 - adversarial_user_agent: Deliberately tries to break things — invalid inputs, SQL injection attempts, rapid clicks, back-button abuse.
+
+It also has 5 advanced agents for deeper coverage:
 - impatient_user_agent: Cancels operations mid-flight, refreshes during submissions, clicks buttons multiple times.
 - accessibility_user_agent: Validates WCAG compliance, screen reader navigation, keyboard-only interaction, high-contrast/zoom modes.
-- constrained_user_agent: Tests degraded-experience paths and responsive design for slow networks and small viewports.
 - data_heavy_user_agent: Uploads large files, creates thousands of records, uses long strings. Exposes performance cliffs.
 - returning_user_agent: Scenarios for returning users with stale sessions, cached pages, outdated bookmarks.
+- explorer_agent (autonomous): Open-ended chaos testing, cross-feature integration, edge cases, regression sweeps.
+
 
 Each mission has:
   - thread_id: A unique identifier namespaced to this PR (format: pr_{number}_{agent_type}_{nn})
@@ -363,17 +385,17 @@ Each mission has:
 Output FORMAT (raw YAML, no code fences):
 
 missions:
-  - thread_id: "pr_123_listing_01"
+  - thread_id: "pr_123_new_user_01"
     prompt: >
       Navigate to ... verify ... interact with ...
 
 Rules:
 1. Generate 3-8 missions depending on the scope of changes.
 2. Each prompt MUST be specific and actionable, referencing concrete UI areas/flows.
-3. Map code changes to the MOST relevant agent type based on what UI pattern is affected.
+3. Map code changes to the MOST relevant remaining agent persona based on the user behavior or risk being tested.
 4. Include at least one explorer/autonomous mission for broad regression coverage.
 5. Thread IDs MUST follow the pattern: pr_{number}_{agenttype}_{nn}
-6. Use "explorer" or "autonomous" in thread_id for chaos-exploration missions.
+6. Use "accessibility", "data_heavy", "impatient", "returning", "explorer", "chaos", or "autonomous" in thread_id for advanced missions.
 7. Prompts should reference the specific features/areas that the code changes touch.
 8. Do NOT use placeholder values — use the actual app name and URL provided.
 9. Each prompt should tell the agent what page to navigate to, what to interact with, \
@@ -416,6 +438,12 @@ def _validate_missions(data: Any, pr_number: int) -> dict:
             raise ValueError(f"Mission {i} missing 'thread_id' or 'prompt'")
         if not isinstance(m["thread_id"], str) or not isinstance(m["prompt"], str):
             raise ValueError(f"Mission {i} 'thread_id' and 'prompt' must be strings")
+        thread_id = m["thread_id"].lower()
+        thread_id_tokens = set(re.split(r"[^a-z0-9]+", thread_id))
+        if any(keyword in thread_id_tokens for keyword in _DELETED_PR_AGENT_KEYWORDS):
+            raise ValueError(f"Mission {i} uses a deleted agent in thread_id: {m['thread_id']}")
+        if not any(keyword in thread_id for keyword in _ALLOWED_PR_AGENT_KEYWORDS):
+            raise ValueError(f"Mission {i} does not target an allowed agent: {m['thread_id']}")
     return data
 
 

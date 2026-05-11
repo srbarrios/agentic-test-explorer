@@ -17,7 +17,7 @@ warnings.filterwarnings(
 from agentic_explorer.utils import console  # noqa: E402
 
 from langchain_core.messages import (  # noqa: E402
-    HumanMessage, AIMessage, AIMessageChunk, ToolMessage, SystemMessage,
+    HumanMessage, AIMessage, AIMessageChunk, SystemMessage,
 )
 
 from playwright.async_api import async_playwright
@@ -37,8 +37,18 @@ from agentic_explorer.orchestration.advanced_graph import build_advanced_graph
 load_environment()
 
 # Mission-type detection: thread_ids matching these substrings are routed to the
-# advanced (autonomous explorer) graph instead of the standard 5-agent UI swarm.
-ADVANCED_KEYWORDS = ("explorer", "chaos", "autonomous")
+# advanced graph instead of the standard 3-persona swarm.
+ADVANCED_KEYWORDS = (
+    "accessibility",
+    "a11y",
+    "data_heavy",
+    "data-heavy",
+    "impatient",
+    "returning",
+    "explorer",
+    "chaos",
+    "autonomous",
+)
 
 
 def _get_async_sqlite_saver() -> Any:
