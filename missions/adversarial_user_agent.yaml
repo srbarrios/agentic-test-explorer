@@ -1,0 +1,8 @@
+missions:
+- thread_id: test_adversarial_user_01
+  prompt: 'Persona: adversarial_user_agent
+
+
+    Test <APP_URL> adversarially. Enter malformed strings, manipulate the URL parameters
+    manually, abuse the browser back/forward buttons constantly, and check if the
+    app degrades securely without exposing sensitive info.'

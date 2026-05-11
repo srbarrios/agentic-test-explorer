@@ -57,13 +57,22 @@ execution:
 The generated missions follow the standard YAML format and are routed to agents via the same
 `thread_id`-keyword mechanism. Thread IDs use the convention `pr_{number}_{agenttype}_{nn}`.
 
-* **Standard QA Agents** (`src/agentic_explorer/orchestration/standard_graph.py`): Five
-  UI-pattern specialists. Tools are split by modality (DOM-only vs. visual validation).
+* **Standard QA Agents** (`src/agentic_explorer/orchestration/standard_graph.py`): Thirteen agents available for routing by the supervisor:
+  * **5 UI-pattern specialists**: Tools are split by modality (DOM-only vs. visual validation).
     * `listing_agent` (DOM tools) — lists, tables, search/filter bars, pagination, row flyouts.
     * `graph_agent` (DOM + visual) — node-link graphs, timelines, waterfalls, complex SVG/Canvas.
     * `chart_agent` (DOM + visual) — time-series, bar/line/area charts, KPI tiles, dashboards.
     * `map_agent` (DOM + visual) — geographic maps, status grids, geospatial overlays.
     * `form_agent` (DOM tools) — forms, wizards, validation flows, multi-step configuration.
+  * **8 Generic Exploration Personas**: These personas apply behavioral strategies to the application.
+    * `new_user_agent` — tests onboarding flows, discoverability, default states, and empty states.
+    * `power_user_agent` — uses keyboard shortcuts, bulk operations, advanced filters, edge-case workflows.
+    * `adversarial_user_agent` — deliberately tries to break things (invalid inputs, back-button abuse).
+    * `impatient_user_agent` — cancels operations mid-flight, refreshes during submissions, clicks buttons multiple times.
+    * `accessibility_user_agent` — validates WCAG compliance, screen reader navigation, keyboard-only interaction.
+    * `constrained_user_agent` — tests degraded-experience paths and responsive design for slow networks and small viewports.
+    * `data_heavy_user_agent` — uploads large files, creates thousands of records, uses long strings.
+    * `returning_user_agent` — scenarios for returning users with stale sessions, cached pages, outdated bookmarks.
 * **Advanced Testing Agents** (`src/agentic_explorer/orchestration/advanced_graph.py`):
     * `explorer_agent` — autonomous chaos exploration; uses the full Record-and-Translate
       engine. The advanced graph's single-agent supervisor is preserved as an extension point

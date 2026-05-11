@@ -1,0 +1,8 @@
+missions:
+- thread_id: test_new_user_01
+  prompt: 'Persona: new_user_agent
+
+
+    As a new user visiting <APP_URL>, explore the initial onboarding flow. Verify
+    empty states exist where expected, and confirm that initial tooltips or welcome
+    guides point toward primary actions.'
