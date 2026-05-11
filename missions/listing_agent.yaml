@@ -1,8 +1,0 @@
-missions:
-- thread_id: test_listing_01
-  prompt: 'Persona: listing_agent
-
-
-    Navigate to the main list view in <APP_URL>. Sort columns, use the search bar,
-    filter by multiple criteria, and assert the results are accurate. Paginate through
-    the list and open item details to ensure context is preserved.'

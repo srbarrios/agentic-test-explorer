@@ -1,8 +1,0 @@
-missions:
-- thread_id: test_graph_01
-  prompt: 'Persona: graph_agent
-
-
-    Load a node-link or timeline graph view in <APP_URL>. Hover over edges and nodes,
-    verifying that tooltips correctly show data and connections. Use analyze_visual_state
-    to confirm correct rendering without overlap.'

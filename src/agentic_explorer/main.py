@@ -17,7 +17,7 @@ warnings.filterwarnings(
 from agentic_explorer.utils import console  # noqa: E402
 
 from langchain_core.messages import (  # noqa: E402
-    HumanMessage, AIMessage, AIMessageChunk, ToolMessage, SystemMessage,
+    HumanMessage, AIMessage, AIMessageChunk, SystemMessage,
 )
 
 from playwright.async_api import async_playwright
@@ -37,8 +37,47 @@ from agentic_explorer.orchestration.advanced_graph import build_advanced_graph
 load_environment()
 
 # Mission-type detection: thread_ids matching these substrings are routed to the
-# advanced (autonomous explorer) graph instead of the standard 5-agent UI swarm.
-ADVANCED_KEYWORDS = ("explorer", "chaos", "autonomous")
+# advanced graph instead of the standard 3-persona swarm.
+ADVANCED_KEYWORDS = (
+    "accessibility",
+    "a11y",
+    "data_heavy",
+    "data-heavy",
+    "impatient",
+    "returning",
+    "explorer",
+    "chaos",
+    "autonomous",
+)
+
+REPORT_TRANSCRIPT_MAX_CHARS = 35_000
+REPORT_TRANSCRIPT_HEAD_CHARS = 6_000
+
+
+def _clip_for_prompt(text: str, max_chars: int) -> str:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 24:
+        return text[:max(0, max_chars)]
+    return text[: max_chars - 24].rstrip() + " … [truncated]"
+
+
+def _bound_transcript_for_report(transcript: str) -> str:
+    """Keep report context within a predictable prompt budget.
+
+    Reports need the mission start plus the latest outcomes most. Preserve both
+    ends and disclose how much was omitted instead of sending unbounded history.
+    """
+    if len(transcript) <= REPORT_TRANSCRIPT_MAX_CHARS:
+        return transcript
+    tail_chars = REPORT_TRANSCRIPT_MAX_CHARS - REPORT_TRANSCRIPT_HEAD_CHARS - 160
+    omitted = len(transcript) - REPORT_TRANSCRIPT_HEAD_CHARS - tail_chars
+    return (
+        transcript[:REPORT_TRANSCRIPT_HEAD_CHARS].rstrip()
+        + f"\n\n... [omitted {omitted:,} chars of middle transcript for context budget] ...\n\n"
+        + transcript[-tail_chars:].lstrip()
+    )
 
 
 def _get_async_sqlite_saver() -> Any:
@@ -380,9 +419,9 @@ async def run_missions():
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     text_content += f" [Action: {', '.join(tc['name'] for tc in msg.tool_calls)}]"
                 if text_content.strip():
-                    transcript_lines.append(f"{msg.type.upper()}: {text_content.strip()}")
+                    transcript_lines.append(f"{msg.type.upper()}: {_clip_for_prompt(text_content, 2_000)}")
 
-            clean_transcript = "\n".join(transcript_lines)
+            clean_transcript = _bound_transcript_for_report("\n".join(transcript_lines))
 
             _active_provider = os.getenv("LLM_PROVIDER", "").lower()
             report_model = (
