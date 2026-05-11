@@ -344,8 +344,17 @@ The framework has 6 agent types, each specializing in specific UI patterns:
 - chart_agent: Charts, dashboards, KPI tiles, time-range pickers, gauge widgets
 - map_agent: Geographic maps, status grids, spatial overlays, marker clusters
 - form_agent: Forms, multi-step wizards, validation flows, configuration screens, input fields
-- explorer_agent (autonomous): Open-ended chaos testing, cross-feature integration, \
-edge cases, regression sweeps (use thread_id containing "explorer" or "autonomous")
+- explorer_agent (autonomous): Open-ended chaos testing, cross-feature integration, edge cases, regression sweeps (use thread_id containing "explorer" or "autonomous")
+
+In addition, it has 8 generic exploration personas that you can route to:
+- new_user_agent: Tests onboarding flows, discoverability, default states, and empty states. Catches assumptions developers make about prior knowledge.
+- power_user_agent: Uses keyboard shortcuts, bulk operations, advanced filters, edge-case workflows. Pushes features to their limits.
+- adversarial_user_agent: Deliberately tries to break things — invalid inputs, SQL injection attempts, rapid clicks, back-button abuse.
+- impatient_user_agent: Cancels operations mid-flight, refreshes during submissions, clicks buttons multiple times.
+- accessibility_user_agent: Validates WCAG compliance, screen reader navigation, keyboard-only interaction, high-contrast/zoom modes.
+- constrained_user_agent: Tests degraded-experience paths and responsive design for slow networks and small viewports.
+- data_heavy_user_agent: Uploads large files, creates thousands of records, uses long strings. Exposes performance cliffs.
+- returning_user_agent: Scenarios for returning users with stale sessions, cached pages, outdated bookmarks.
 
 Each mission has:
   - thread_id: A unique identifier namespaced to this PR (format: pr_{number}_{agent_type}_{nn})

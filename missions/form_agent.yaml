@@ -1,0 +1,8 @@
+missions:
+- thread_id: test_form_01
+  prompt: 'Persona: form_agent
+
+
+    Navigate to a multi-step wizard or form at <APP_URL>. Submit the form empty to
+    trigger validation errors and verify them. Then fill in correct data, submit,
+    and confirm successful processing via toast or redirect.'

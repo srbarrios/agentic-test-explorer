@@ -41,6 +41,19 @@ missions:
 | `map_agent`       | Geographic maps, status grids, geospatial overlays                    |
 | `form_agent`      | Forms, wizards, validation, multi-step configuration                  |
 
+## Generic Exploration Personas (Behavioral strategies)
+
+| Agent                      | Specialization                                                        |
+|----------------------------|-----------------------------------------------------------------------|
+| `new_user_agent`           | Tests onboarding flows, discoverability, default states, empty states |
+| `power_user_agent`         | Keyboards shortcuts, bulk operations, advanced filters, edge cases    |
+| `adversarial_user_agent`   | Deliberately breaks things (malformed inputs, back-button abuse)      |
+| `impatient_user_agent`     | Rapid interactions, cancels operations, refreshes during load         |
+| `accessibility_user_agent` | Validates WCAG, screen reader nav, keyboard-only interaction          |
+| `constrained_user_agent`   | Tests degraded paths, slow networks, small viewports                  |
+| `data_heavy_user_agent`    | Uploads large files, thousands of records, excessively long strings   |
+| `returning_user_agent`     | Stale sessions, cached pages, outdated bookmarks                      |
+
 ## Advanced agents
 
 | Agent             | Mission                                                               |
@@ -55,5 +68,4 @@ missions:
 4. If the test should run autonomously without scripted steps, name it with `explorer`,
    `chaos`, or `autonomous` to dispatch to the advanced graph.
 
-See [`smoke.yaml`](smoke.yaml) and [`autonomous_exploration.yaml`](autonomous_exploration.yaml)
-for working templates.
+Each persona has a generic mission template named `<persona>_agent.yaml` in this folder to help you get started.

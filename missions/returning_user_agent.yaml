@@ -1,0 +1,8 @@
+missions:
+- thread_id: test_returning_user_01
+  prompt: 'Persona: returning_user_agent
+
+
+    Act as a returning user on <APP_URL>. Test interactions with potentially stale
+    session cookies or cached local storage data. Navigate to outdated deep-linked
+    bookmarks to see if the app properly redirects or errors gracefully.'

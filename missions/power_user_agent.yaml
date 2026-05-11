@@ -1,0 +1,8 @@
+missions:
+- thread_id: test_power_user_01
+  prompt: 'Persona: power_user_agent
+
+
+    Act as a power user in <APP_URL>. Exploit keyboard shortcuts, use bulk operations
+    across multiple items, and set advanced data filters. Verify performance and accurate
+    processing of mass actions.'

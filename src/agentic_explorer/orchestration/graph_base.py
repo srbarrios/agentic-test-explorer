@@ -170,7 +170,7 @@ def make_agent_node(agent, *, name: str = "agent", quiet: bool = False):
     return _node
 
 
-def make_supervisor_node(llm, agent_names: tuple, app_url: str, max_steps: int):
+def make_supervisor_node(llm, agent_names: tuple, app_url: str, max_steps: int, agent_descriptions: str = None):
     """Return an async LangGraph supervisor node with step-limit reset and exploration context.
 
     The supervisor:
@@ -221,10 +221,11 @@ def make_supervisor_node(llm, agent_names: tuple, app_url: str, max_steps: int):
             unique_paths = list(dict.fromkeys(state["explored_paths"]))[:5]
             paths_ctx = f" Already explored: {unique_paths}."
 
+        avail_str = f"\n{agent_descriptions}\n" if agent_descriptions else available_agents
         supervisor_prompt = (
             f"You are the QA Orchestrator.{bugs_ctx}{paths_ctx} "
             f"Decide which agent tests next based on the mission progress. "
-            f"Available agents: {available_agents}. "
+            f"Available agents: {avail_str}. "
             "Respond with 'FINISH' only when the mission objective is fully achieved "
             "and sufficient areas have been covered."
         )

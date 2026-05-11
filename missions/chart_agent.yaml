@@ -1,0 +1,8 @@
+missions:
+- thread_id: test_chart_01
+  prompt: 'Persona: chart_agent
+
+
+    Go to a dashboard view with time-series or bar charts at <APP_URL>. Adjust the
+    time-range picker to <example_time_range>. Validate that tooltips show expected
+    KPIs and data lines render cleanly with analyze_visual_state.'

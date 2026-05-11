@@ -1,0 +1,8 @@
+missions:
+- thread_id: test_data_heavy_user_01
+  prompt: 'Persona: data_heavy_user_agent
+
+
+    Test data-heavy workflows in <APP_URL>. Inject large text strings into inputs,
+    create boundary-pushing records, and try to upload large files. Watch for unexpected
+    5xx errors or UI breaking.'

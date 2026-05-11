@@ -137,16 +137,112 @@ def build_graph(base_tools: list, active_page: Page, checkpointer, app: AppMeta,
         + global_qa_rule
     )))
 
+    new_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=(
+        "You are the New User / First-Timer Persona."
+        + app_context +
+        " You know nothing about the app. Test onboarding flows, discoverability, default states, and empty states. "
+        "Catch assumptions developers make about prior knowledge. "
+        "Drive the UI exclusively through 'execute_browser_command' JSON intents."
+        + global_qa_rule
+    )))
+
+    power_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=(
+        "You are the Power User Persona."
+        + app_context +
+        " You use keyboard shortcuts, bulk operations, advanced filters, edge-case workflows. "
+        "Push features to their limits and chain operations in unexpected ways. "
+        "Drive the UI exclusively through 'execute_browser_command' JSON intents."
+        + global_qa_rule
+    )))
+
+    adversarial_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=(
+        "You are the Adversarial User (Chaos Monkey) Persona."
+        + app_context +
+        " You deliberately try to break things — invalid inputs, SQL injection attempts, rapid clicks, back-button abuse, "
+        "concurrent sessions, boundary values. Focused on robustness and security. "
+        "Drive the UI exclusively through 'execute_browser_command' JSON intents."
+        + global_qa_rule
+    )))
+
+    impatient_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=(
+        "You are the Impatient User Persona."
+        + app_context +
+        " You cancel operations mid-flight, refresh during submissions, click buttons multiple times, navigate away during async processes. "
+        "Expose race conditions and incomplete state handling. "
+        "Drive the UI exclusively through 'execute_browser_command' JSON intents."
+        + global_qa_rule
+    )))
+
+    accessibility_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=(
+        "You are the Accessibility User Persona."
+        + app_context +
+        " You test for Screen reader navigation, keyboard-only interaction, high-contrast/zoom modes. "
+        "Validate WCAG compliance and inclusive design. "
+        "Drive the UI exclusively through 'execute_browser_command' JSON intents."
+        + global_qa_rule
+    )))
+
+    constrained_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=(
+        "You are the Mobile / Constrained User Persona."
+        + app_context +
+        " You simulate slow network, small viewport, intermittent connectivity, low storage. "
+        "Test degraded-experience paths and responsive design. "
+        "Drive the UI exclusively through 'execute_browser_command' JSON intents."
+        + global_qa_rule
+    )))
+
+    data_heavy_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=(
+        "You are the Data-Heavy User Persona."
+        + app_context +
+        " You upload large files, create thousands of records, use long strings, deeply nested structures. "
+        "Expose performance cliffs and pagination bugs. "
+        "Drive the UI exclusively through 'execute_browser_command' JSON intents."
+        + global_qa_rule
+    )))
+
+    returning_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=(
+        "You are the Returning User Persona."
+        + app_context +
+        " You simulate having stale sessions, cached pages, outdated bookmarks, saved credentials. "
+        "Test upgrade paths, session expiry, and backward compatibility. "
+        "Drive the UI exclusively through 'execute_browser_command' JSON intents."
+        + global_qa_rule
+    )))
+
     agent_registry = {
         "listing_agent": listing_agent,
         "graph_agent": graph_agent,
         "chart_agent": chart_agent,
         "map_agent": map_agent,
         "form_agent": form_agent,
+        "new_user_agent": new_user_agent,
+        "power_user_agent": power_user_agent,
+        "adversarial_user_agent": adversarial_user_agent,
+        "impatient_user_agent": impatient_user_agent,
+        "accessibility_user_agent": accessibility_user_agent,
+        "constrained_user_agent": constrained_user_agent,
+        "data_heavy_user_agent": data_heavy_user_agent,
+        "returning_user_agent": returning_user_agent,
     }
 
+    agent_descriptions = """
+- listing_agent: List views, search/filter, pagination, data tables, row details, flyouts
+- graph_agent: Node-link graphs, timelines, tree visualizations, SVG/Canvas renders
+- chart_agent: Charts, dashboards, KPI tiles, time-range pickers, gauge widgets
+- map_agent: Geographic maps, status grids, spatial overlays, marker clusters
+- form_agent: Forms, multi-step wizards, validation flows, configuration screens, input fields
+- new_user_agent: Tests onboarding flows, discoverability, default states, and empty states.
+- power_user_agent: Uses keyboard shortcuts, bulk operations, advanced filters, edge-case workflows.
+- adversarial_user_agent: Deliberately tries to break things — invalid inputs, SQL injection attempts, rapid clicks, back-button abuse.
+- impatient_user_agent: Cancels operations mid-flight, refreshes during submissions, clicks buttons multiple times.
+- accessibility_user_agent: Validates WCAG compliance, screen reader navigation, keyboard-only interaction.
+- constrained_user_agent: Tests degraded-experience paths and responsive design for slow networks and small viewports.
+- data_heavy_user_agent: Uploads large files, creates thousands of records, uses long strings.
+- returning_user_agent: Scenarios for returning users with stale sessions, cached pages, outdated bookmarks.
+"""
+
     workflow = StateGraph(AgentState)  # type: ignore[arg-type]
-    workflow.add_node("Supervisor", make_supervisor_node(llm, tuple(agent_registry), app_url, max_steps))  # type: ignore[arg-type]
+    workflow.add_node("Supervisor", make_supervisor_node(llm, tuple(agent_registry), app_url, max_steps, agent_descriptions))  # type: ignore[arg-type]
     for agent_name, agent in agent_registry.items():
         workflow.add_node(agent_name, make_agent_node(agent, name=agent_name, quiet=quiet))  # type: ignore[arg-type]
 

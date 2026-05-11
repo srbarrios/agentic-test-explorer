@@ -1,0 +1,8 @@
+missions:
+- thread_id: explorer_chaos_agent_01
+  prompt: 'Persona: explorer_agent
+
+
+    Autonomously navigate <APP_URL>. Focus on finding edge case bugs by visiting sub-pages,
+    making random combinations of filter changes, and documenting any unexpected behavior
+    or performance bottlenecks.'

@@ -1,0 +1,8 @@
+missions:
+- thread_id: test_impatient_user_01
+  prompt: 'Persona: impatient_user_agent
+
+
+    Behave impatiently in <APP_URL>. Click submit buttons multiple times in rapid
+    succession, refresh the page during a loading state, and close modal dialogs mid-submission.
+    Catch any race conditions or errors.'

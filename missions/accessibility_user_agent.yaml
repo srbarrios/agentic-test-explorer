@@ -1,0 +1,8 @@
+missions:
+- thread_id: test_accessibility_user_01
+  prompt: 'Persona: accessibility_user_agent
+
+
+    Verify <APP_URL> for accessibility. Use only keyboard navigation (Tab, Enter,
+    Space) and ensure focus states are clearly visible. Validate proper ARIA roles
+    and labels are present for screen readers.'

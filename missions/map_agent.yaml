@@ -1,0 +1,8 @@
+missions:
+- thread_id: test_map_01
+  prompt: 'Persona: map_agent
+
+
+    Find a geographic map or status grid in <APP_URL>. Pan and zoom in/out. Verify
+    cluster expansion behavior and hover on a marker to check its popup for required
+    fields. Validate the visual layout using analyze_visual_state.'
