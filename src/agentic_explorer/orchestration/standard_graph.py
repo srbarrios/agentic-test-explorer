@@ -17,6 +17,7 @@ from agentic_explorer.orchestration.graph_base import (
     make_supervisor_node,
     make_llm,
     compile_swarm,
+    make_browser_agent_prompt,
 )
 
 # ---------------------------------------------------------
@@ -58,56 +59,22 @@ def build_graph(base_tools: list, active_page: Page, checkpointer, app: AppMeta,
         bug_screenshot,
         generate_reproduction_spec,
     ]
-    global_qa_rule = (
-        " ARCHITECTURE — RECORD & TRANSLATE: You are the *brain*. You do NOT touch the browser directly."
-        " To interact with the application you MUST emit strict JSON commands to 'execute_browser_command'."
-        " Use 'get_dom_snapshot' to inspect the page before choosing a selector."
-        " Use 'check_page_health' (action: 'check_page_health') to detect spinners and error banners."
-        " Every command is appended to an immutable Action Tape. Supported actions:"
-        " navigate, click, fill, press, select_option, hover, wait_for, scroll, extract_text,"
-        " snapshot, check_page_health."
-        " Example: execute_browser_command({\"action\":\"click\",\"selector\":\"[data-test-subj='submitButton']\"})."
-        " BEFORE planning, if MCP documentation tools or installed Skills are available,"
-        " consult them to look up expected behaviors for the area under test. Do not guess."
-        " IMPORTANT: If you discover any UI error, missing element, tool failure, or visual anomaly,"
-        " you MUST (1) invoke 'capture_bug_screenshot' to save visual evidence, then"
-        " (2) invoke 'generate_reproduction_spec' so the Action Tape is translated into a"
-        " runnable Playwright .spec.ts that the developer can execute locally."
-        " ——— SELECTOR POLICY (STRICTLY ENFORCED) ———"
-        " You MUST use ONLY resilient, stable selectors. Priority order:"
-        " 1. data-test-subj attributes   → [data-test-subj='myButton']"
-        " 2. ARIA labels / roles         → [aria-label='Search'], role='dialog'"
-        " 3. Semantic HTML / visible text → button:has-text('Save'), text='Apply'"
-        " FORBIDDEN: XPath expressions (//div, /html/body/div[2]/span), positional CSS like"
-        " 'div:nth-child(3) > span'. Call get_dom_snapshot first and look for data-test-subj"
-        " or aria-label. NEVER invent a selector — brittle selectors cause flaky scripts."
-    )
-
-    new_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=(
-        "You are the New User / First-Timer Persona."
-        + app_context +
-        " You know nothing about the app. Test onboarding flows, discoverability, default states, and empty states. "
-        "Catch assumptions developers make about prior knowledge. "
-        "Drive the UI exclusively through 'execute_browser_command' JSON intents."
-        + global_qa_rule
+    new_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=make_browser_agent_prompt(
+        "the New User / First-Timer Persona",
+        app_context,
+        "Test onboarding, discoverability, default states, and empty states. Catch assumptions about prior knowledge.",
     )))
 
-    power_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=(
-        "You are the Power User Persona."
-        + app_context +
-        " You use keyboard shortcuts, bulk operations, advanced filters, edge-case workflows. "
-        "Push features to their limits and chain operations in unexpected ways. "
-        "Drive the UI exclusively through 'execute_browser_command' JSON intents."
-        + global_qa_rule
+    power_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=make_browser_agent_prompt(
+        "the Power User Persona",
+        app_context,
+        "Use keyboard shortcuts, bulk operations, advanced filters, and edge workflows; chain operations in unexpected ways.",
     )))
 
-    adversarial_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=(
-        "You are the Adversarial User (Chaos Monkey) Persona."
-        + app_context +
-        " You deliberately try to break things — invalid inputs, SQL injection attempts, rapid clicks, back-button abuse, "
-        "concurrent sessions, boundary values. Focused on robustness and security. "
-        "Drive the UI exclusively through 'execute_browser_command' JSON intents."
-        + global_qa_rule
+    adversarial_user_agent = create_agent(llm, tools=dom_tools, system_prompt=SystemMessage(content=make_browser_agent_prompt(
+        "the Adversarial User (Chaos Monkey) Persona",
+        app_context,
+        "Try to break flows with invalid inputs, injection-like strings, rapid clicks, back-button abuse, concurrent sessions, and boundary values.",
     )))
 
     agent_registry = {

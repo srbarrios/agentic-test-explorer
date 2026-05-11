@@ -27,6 +27,9 @@ missions:
 
 * Free-form natural language. The supervisor reads it and decides which specialist agent
   should drive the test.
+* Keep prompts concise and task-oriented. Prefer the smallest context that identifies the
+  page/flow, interactions, and expected verification. Let agents disclose additional MCP,
+  Skill, DOM, and PR context only when needed.
 * Mention the user persona or risk area you want exercised so the supervisor routes to the
   right agent.
 * Use placeholders for app-specific values — for example `<YOUR_APP>`, `<APP_URL>`,
@@ -53,7 +56,7 @@ missions:
 ## Writing a new mission
 
 1. Pick a `thread_id` that signals the persona or area under test (e.g. `smoke_new_user_01`).
-2. Write a prompt that tells the agent **what to do** and **what to verify**, not how.
+2. Write a concise prompt that tells the agent **what to do** and **what to verify**, not how.
 3. Reference the persona or risk area the supervisor should route to.
 4. If the test should run on an advanced agent, include one of the advanced routing keywords
    in the `thread_id`; for autonomous exploration, use `explorer`, `chaos`, or `autonomous`.

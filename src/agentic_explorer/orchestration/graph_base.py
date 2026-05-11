@@ -21,6 +21,24 @@ from agentic_explorer.utils import console
 from agentic_explorer.utils.llm import make_llm  # noqa: F401  re-exported for back-compat
 
 
+BROWSER_AGENT_RULES = (
+    " Context policy: use progressive disclosure. Start with mission + current DOM; "
+    "call MCP/Skill tools only for the specific feature under test, and request details "
+    "only when needed. Browser policy: you are the brain, not the hands. Interact only "
+    "through execute_browser_command JSON intents after get_dom_snapshot. Allowed actions: "
+    "navigate, click, fill, press, select_option, hover, wait_for, scroll, extract_text, "
+    "snapshot, check_page_health. Selector policy: prefer data-test-subj, then ARIA/roles, "
+    "then semantic text; never use XPath, nth-child/nth-of-type, or guessed structural CSS. "
+    "Failure policy: on any UI error, missing element, tool failure, or visual anomaly, call "
+    "capture_bug_screenshot, then generate_reproduction_spec immediately."
+)
+
+
+def make_browser_agent_prompt(role: str, app_context: str, focus: str) -> str:
+    """Build a compact system prompt for browser-driving QA agents."""
+    return f"You are {role}.{app_context} {focus} {BROWSER_AGENT_RULES}"
+
+
 # ---------------------------------------------------------
 # Shared state schema
 # ---------------------------------------------------------
@@ -93,6 +111,85 @@ def _msg_text(msg: BaseMessage) -> str:
     if isinstance(content, list):
         return "".join(b.get("text", "") for b in content if isinstance(b, dict) and "text" in b)
     return str(content)
+
+
+def _clip_text(text: str, max_chars: int) -> str:
+    """Return ``text`` capped for LLM routing/report prompts."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 24:
+        return text[:max(0, max_chars)]
+    return text[: max_chars - 24].rstrip() + " … [truncated]"
+
+
+def _compact_message(msg: BaseMessage, max_chars: int = 900) -> str:
+    """Summarize one LangChain message for supervisor routing.
+
+    The supervisor only needs enough context to pick the next worker. Passing the
+    complete historical transcript on every turn can exhaust context on long
+    missions, so this keeps recent intent, tool names, and tool outcomes only.
+    """
+    if isinstance(msg, SystemMessage):
+        return ""
+    role = msg.type.upper()
+    text = _clip_text(_msg_text(msg), max_chars)
+    tool_calls = getattr(msg, "tool_calls", None) or []
+    if tool_calls:
+        tools = ", ".join(tc.get("name", "unknown_tool") for tc in tool_calls)
+        text = f"{text} [tool_calls: {tools}]" if text else f"[tool_calls: {tools}]"
+    if isinstance(msg, ToolMessage):
+        tool_name = getattr(msg, "name", "tool") or "tool"
+        role = f"TOOL:{tool_name}"
+    return f"{role}: {text}" if text else ""
+
+
+def _first_human_message(messages: Sequence[BaseMessage]) -> str:
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            return _clip_text(_msg_text(msg), 1800)
+    return "<mission prompt unavailable>"
+
+
+def _format_recent_progress(messages: Sequence[BaseMessage], *, limit: int = 12) -> str:
+    compact = [line for msg in messages if (line := _compact_message(msg))]
+    recent = compact[-limit:]
+    if not recent:
+        return "- No agent progress yet."
+    return "\n".join(f"- {line}" for line in recent)
+
+
+def _format_recent_actions(actions: Sequence[Dict[str, Any]], *, limit: int = 10) -> str:
+    recent = list(actions)[-limit:]
+    if not recent:
+        return "- No browser actions recorded yet."
+    lines = []
+    for entry in recent:
+        action = entry.get("action", "unknown")
+        ok = "ok" if entry.get("ok") else "error"
+        params = entry.get("params") or {}
+        selector = params.get("selector") or params.get("url") or params.get("key") or ""
+        lines.append(f"- {action}({selector}) -> {ok}")
+    return "\n".join(lines)
+
+
+def _build_routing_context(state: AgentState, extra_messages: Sequence[BaseMessage]) -> str:
+    """Build a bounded routing brief for the supervisor LLM."""
+    messages = list(state.get("messages", []))
+    bugs = list(state.get("bugs_found", []))
+    paths = list(dict.fromkeys(state.get("explored_paths", [])))[:8]
+    reset_lines = [line for msg in extra_messages if (line := _compact_message(msg, max_chars=700))]
+
+    sections = [
+        "MISSION:\n" + _first_human_message(messages),
+        "RECENT_PROGRESS:\n" + _format_recent_progress(messages),
+        "RECENT_BROWSER_ACTIONS:\n" + _format_recent_actions(state.get("action_tape", [])),
+        "BUGS_FOUND:\n" + ("\n".join(f"- {_clip_text(b, 240)}" for b in bugs[-8:]) if bugs else "- none"),
+        "EXPLORED_URLS:\n" + ("\n".join(f"- {p}" for p in paths) if paths else "- none"),
+    ]
+    if reset_lines:
+        sections.append("RESET_DIRECTIVE:\n" + "\n".join(f"- {line}" for line in reset_lines))
+    return "\n\n".join(sections)
 
 
 def _summarize_tool_args(tool_call: dict, max_chars: int = 80) -> str:
@@ -230,10 +327,14 @@ def make_supervisor_node(llm, agent_names: tuple, app_url: str, max_steps: int, 
             "and sufficient areas have been covered."
         )
 
-        messages_for_routing = list(state["messages"]) + extra_messages
-        routing_request = HumanMessage(content="Based on the progress above, which agent should act next?")
+        routing_context = _build_routing_context(state, extra_messages)
+        routing_request = HumanMessage(content=(
+            "Use this compact mission context to choose the next agent. Do not request "
+            "full history unless necessary; route based on current objective, recent "
+            f"progress, and coverage gaps.\n\n{routing_context}\n\nWhich agent should act next?"
+        ))
         decision = await routing_llm.ainvoke(
-            [SystemMessage(content=supervisor_prompt), *messages_for_routing, routing_request]
+            [SystemMessage(content=supervisor_prompt), routing_request]
         )
 
         result: dict = {"next_agent": decision["next"], "step_count": current_step}

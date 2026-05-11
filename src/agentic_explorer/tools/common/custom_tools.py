@@ -126,13 +126,15 @@ def _read_text_safe(path: Path, max_chars: int = 20000) -> str:
 
 
 @tool
-def fetch_agent_skill(skill_name: str) -> str:
+def fetch_agent_skill(skill_name: str, include_references: bool = False, reference_path: str = "") -> str:
     """
     Load an installed Agent Skill from the user's local skills directory.
 
     Follows the https://agentskills.io/specification progressive-disclosure model:
       * Always returns the SKILL.md contents.
-      * Appends every Markdown file found recursively under references/.
+      * By default, lists references/ Markdown files without loading them.
+      * Set include_references=true to load references. Use reference_path to
+        load a single reference when only one document is needed.
       * Lists available scripts/ entries (names + exec bits) so the agent can
         decide whether to invoke `run_agent_skill_script`.
       * Lists available assets/ filenames for awareness.
@@ -156,16 +158,55 @@ def fetch_agent_skill(skill_name: str) -> str:
     skill_md = skill_dir / "SKILL.md"
     sections.append("## SKILL.md\n" + _read_text_safe(skill_md))
 
-    # 2. references/ — recursive Markdown documentation
+    # 2. references/ — manifest by default; bodies only on explicit request.
     references_dir = skill_dir / "references"
     if references_dir.is_dir():
         md_files = sorted(p for p in references_dir.rglob("*.md") if p.is_file())
         if md_files:
-            ref_section = ["## references/"]
-            for md in md_files:
-                rel = md.relative_to(skill_dir)
-                ref_section.append(f"### {rel.as_posix()}\n{_read_text_safe(md)}")
-            sections.append("\n\n".join(ref_section))
+            if include_references:
+                requested = reference_path.strip().strip("/")
+                total_ref_bytes = sum(md.stat().st_size for md in md_files)
+                if not requested and total_ref_bytes > 30_000:
+                    ref_entries = [
+                        f"- `{md.relative_to(skill_dir).as_posix()}` ({md.stat().st_size:,} bytes)"
+                        for md in md_files
+                    ]
+                    sections.append(
+                        "## references/\n"
+                        f"References total {total_ref_bytes:,} bytes, so bodies were not bulk-loaded. "
+                        "Call fetch_agent_skill again with include_references=true and "
+                        "reference_path='<one of these paths>'.\n"
+                        + "\n".join(ref_entries)
+                    )
+                    return "\n\n".join(sections)
+                ref_section = ["## references/"]
+                selected = md_files
+                if requested:
+                    candidate = (skill_dir / requested).resolve()
+                    try:
+                        candidate.relative_to(references_dir.resolve())
+                    except ValueError:
+                        return f"Refusing to read reference '{reference_path}': path escapes references/."
+                    if not candidate.is_file():
+                        return f"Reference '{reference_path}' not found in skill '{skill_dir.name}'."
+                    selected = [candidate]
+                for md in selected:
+                    rel = md.relative_to(skill_dir)
+                    ref_section.append(f"### {rel.as_posix()}\n{_read_text_safe(md, max_chars=12000)}")
+                sections.append("\n\n".join(ref_section))
+            else:
+                ref_entries = []
+                for md in md_files:
+                    rel = md.relative_to(skill_dir).as_posix()
+                    size = md.stat().st_size
+                    ref_entries.append(f"- `{rel}` ({size:,} bytes)")
+                sections.append(
+                    "## references/\n"
+                    "Reference bodies are not loaded by default to conserve context. "
+                    "Call fetch_agent_skill with include_references=true and, preferably, "
+                    "reference_path='<one of these paths>' when details are needed.\n"
+                    + "\n".join(ref_entries)
+                )
 
     # 3. scripts/ — list with exec info (bodies are NOT loaded, per progressive disclosure)
     scripts_dir = skill_dir / "scripts"

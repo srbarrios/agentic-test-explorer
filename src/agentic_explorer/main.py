@@ -50,6 +50,35 @@ ADVANCED_KEYWORDS = (
     "autonomous",
 )
 
+REPORT_TRANSCRIPT_MAX_CHARS = 35_000
+REPORT_TRANSCRIPT_HEAD_CHARS = 6_000
+
+
+def _clip_for_prompt(text: str, max_chars: int) -> str:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 24:
+        return text[:max(0, max_chars)]
+    return text[: max_chars - 24].rstrip() + " … [truncated]"
+
+
+def _bound_transcript_for_report(transcript: str) -> str:
+    """Keep report context within a predictable prompt budget.
+
+    Reports need the mission start plus the latest outcomes most. Preserve both
+    ends and disclose how much was omitted instead of sending unbounded history.
+    """
+    if len(transcript) <= REPORT_TRANSCRIPT_MAX_CHARS:
+        return transcript
+    tail_chars = REPORT_TRANSCRIPT_MAX_CHARS - REPORT_TRANSCRIPT_HEAD_CHARS - 160
+    omitted = len(transcript) - REPORT_TRANSCRIPT_HEAD_CHARS - tail_chars
+    return (
+        transcript[:REPORT_TRANSCRIPT_HEAD_CHARS].rstrip()
+        + f"\n\n... [omitted {omitted:,} chars of middle transcript for context budget] ...\n\n"
+        + transcript[-tail_chars:].lstrip()
+    )
+
 
 def _get_async_sqlite_saver() -> Any:
     """Import AsyncSqliteSaver while suppressing a known upstream pending warning."""
@@ -390,9 +419,9 @@ async def run_missions():
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     text_content += f" [Action: {', '.join(tc['name'] for tc in msg.tool_calls)}]"
                 if text_content.strip():
-                    transcript_lines.append(f"{msg.type.upper()}: {text_content.strip()}")
+                    transcript_lines.append(f"{msg.type.upper()}: {_clip_for_prompt(text_content, 2_000)}")
 
-            clean_transcript = "\n".join(transcript_lines)
+            clean_transcript = _bound_transcript_for_report("\n".join(transcript_lines))
 
             _active_provider = os.getenv("LLM_PROVIDER", "").lower()
             report_model = (

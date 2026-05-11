@@ -120,6 +120,9 @@ The framework is configured through three user-supplied files (templates ship as
 * **Agent Skills** (`fetch_agent_skill`, `run_agent_skill_script`): Discover and execute
   skills installed under `AGENT_SKILLS_ROOT`, following the
   [agentskills.io](https://agentskills.io/specification) progressive-disclosure model.
+  `fetch_agent_skill` returns `SKILL.md` and a `references/` manifest first; pass
+  `include_references=true` with a specific `reference_path` only when detailed reference
+  material is required.
 * **Screenshots & Reproductions**: The screenshot tool captures full-page bug evidence and
   is thread-aware via `RunnableConfig`. The browser engine translates Action Tape entries
   into reproducible Playwright specs.
@@ -167,8 +170,15 @@ Every mission generates artifacts localized in a `report_<thread_id>/` directory
 * `screenshots/`: Full-page screenshots captured when bugs are detected.
 
 ## Conventions When Changing Code
+* **Context Disclosure Rule**: Keep prompts compact enough for regular Opus-class context
+  windows. Do not replay full histories unless absolutely necessary. The supervisor routes
+  from a compact mission brief, recent progress, recent Action Tape entries, bugs, and
+  explored URLs. Report generation preserves the start and latest outcome of long transcripts
+  while omitting the middle. PR scenario generation sends a budgeted diff excerpt rather than
+  the full diff. Tunables: `PR_PROMPT_DIFF_BUDGET_CHARS`, `PR_PROMPT_BODY_BUDGET_CHARS`,
+  `PR_PROMPT_FILE_LIST_LIMIT`, and `PR_GENERATED_MISSION_PROMPT_MAX_CHARS`.
 * **Global QA Rule**: Strictly enforced in
-  `src/agentic_explorer/orchestration/standard_graph.py` and `advanced_graph.py` — agents
+  `src/agentic_explorer/orchestration/graph_base.py` via compact shared prompt helpers — agents
   must consult MCP/Skills first when available, never guess, and capture screenshot evidence
   + call `generate_reproduction_spec` immediately on failures.
 * **Selector Policy (Engine-Enforced)**: `execute_browser_command` rejects brittle selectors
