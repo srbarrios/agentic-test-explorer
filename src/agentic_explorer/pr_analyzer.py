@@ -35,6 +35,37 @@ from agentic_explorer.utils.llm_json import extract_yaml_text
 _PR_URL_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 
 MAX_DIFF_CHARS = 100_000
+PR_PROMPT_DIFF_BUDGET_CHARS = int(os.getenv("PR_PROMPT_DIFF_BUDGET_CHARS", "40000"))
+PR_PROMPT_BODY_BUDGET_CHARS = int(os.getenv("PR_PROMPT_BODY_BUDGET_CHARS", "8000"))
+PR_PROMPT_FILE_LIST_LIMIT = int(os.getenv("PR_PROMPT_FILE_LIST_LIMIT", "80"))
+PR_GENERATED_MISSION_PROMPT_MAX_CHARS = int(os.getenv("PR_GENERATED_MISSION_PROMPT_MAX_CHARS", "1200"))
+
+_ALLOWED_PR_AGENT_KEYWORDS = (
+    "new_user",
+    "power_user",
+    "adversarial_user",
+    "accessibility_user",
+    "accessibility",
+    "a11y",
+    "data_heavy_user",
+    "data_heavy",
+    "data-heavy",
+    "impatient_user",
+    "impatient",
+    "returning_user",
+    "returning",
+    "explorer",
+    "chaos",
+    "autonomous",
+)
+_DELETED_PR_AGENT_KEYWORDS = (
+    "listing",
+    "graph",
+    "chart",
+    "map",
+    "form",
+    "constrained",
+)
 
 
 @dataclass
@@ -324,76 +355,130 @@ async def fetch_pr_data(
 # LLM-based mission generation
 # ---------------------------------------------------------------------------
 
-def _format_file_list(files: list[dict[str, Any]]) -> str:
+def _clip_for_prompt(text: str, max_chars: int) -> str:
+    text = text or ""
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 36:
+        return text[:max(0, max_chars)]
+    return text[: max_chars - 36].rstrip() + f"\n… [truncated {len(text) - max_chars:,} chars]"
+
+
+def _format_file_list(files: list[dict[str, Any]], limit: int = PR_PROMPT_FILE_LIST_LIMIT) -> str:
     lines = []
-    for f in files:
+    for f in files[:limit]:
         name = f["filename"]
         adds = f.get("additions", 0)
         dels = f.get("deletions", 0)
         lines.append(f"- {name} (+{adds}, -{dels})")
+    if len(files) > limit:
+        lines.append(f"- … {len(files) - limit} additional files omitted from prompt budget")
     return "\n".join(lines)
+
+
+def _build_diff_excerpt(diff: str, budget_chars: int = PR_PROMPT_DIFF_BUDGET_CHARS) -> str:
+    """Return a PR diff excerpt that favors file headers and changed hunks.
+
+    The full diff can be fetched and persisted, but scenario generation only needs
+    enough signal to identify UI areas and risk. Keep complete small diffs; for
+    large diffs, allocate a per-file slice so one huge file cannot consume the
+    entire prompt.
+    """
+    if len(diff) <= budget_chars:
+        return diff
+
+    file_sections = re.split(r"(?=^diff --git )", diff, flags=re.MULTILINE)
+    file_sections = [section for section in file_sections if section.strip()]
+    if not file_sections:
+        return _clip_for_prompt(diff, budget_chars)
+
+    per_file_budget = max(1200, budget_chars // max(1, min(len(file_sections), 20)))
+    excerpts: list[str] = []
+    used = 0
+    omitted_files = 0
+
+    for section in file_sections:
+        if used >= budget_chars - 400:
+            omitted_files += 1
+            continue
+        header_lines = []
+        hunk_lines = []
+        for line in section.splitlines():
+            if line.startswith(("diff --git", "index ", "--- ", "+++ ", "@@")):
+                header_lines.append(line)
+            elif line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
+                hunk_lines.append(line)
+        excerpt = "\n".join(header_lines + hunk_lines)
+        excerpt = _clip_for_prompt(excerpt or section, per_file_budget)
+        if used + len(excerpt) > budget_chars - 400:
+            excerpt = _clip_for_prompt(excerpt, max(400, budget_chars - used - 400))
+        excerpts.append(excerpt)
+        used += len(excerpt)
+
+    suffix = (
+        f"\n\n… [diff context disclosed progressively: prompt excerpt is {used:,} chars; "
+        f"full fetched diff was {len(diff):,} chars; omitted {omitted_files} file section(s)]"
+    )
+    return "\n\n".join(excerpts) + suffix
 
 
 _SYSTEM_PROMPT = """\
 You are a QA Test Architect. You analyze code changes in pull requests and generate \
 targeted test missions for an autonomous testing framework.
 
-The framework has 6 agent types, each specializing in specific UI patterns:
-- listing_agent: List views, search/filter, pagination, data tables, row details, flyouts
-- graph_agent: Node-link graphs, timelines, tree visualizations, SVG/Canvas renders
-- chart_agent: Charts, dashboards, KPI tiles, time-range pickers, gauge widgets
-- map_agent: Geographic maps, status grids, spatial overlays, marker clusters
-- form_agent: Forms, multi-step wizards, validation flows, configuration screens, input fields
-- explorer_agent (autonomous): Open-ended chaos testing, cross-feature integration, edge cases, regression sweeps (use thread_id containing "explorer" or "autonomous")
-
-In addition, it has 8 generic exploration personas that you can route to:
+The framework has 3 standard exploration personas:
 - new_user_agent: Tests onboarding flows, discoverability, default states, and empty states. Catches assumptions developers make about prior knowledge.
 - power_user_agent: Uses keyboard shortcuts, bulk operations, advanced filters, edge-case workflows. Pushes features to their limits.
 - adversarial_user_agent: Deliberately tries to break things — invalid inputs, SQL injection attempts, rapid clicks, back-button abuse.
+
+It also has 5 advanced agents for deeper coverage:
 - impatient_user_agent: Cancels operations mid-flight, refreshes during submissions, clicks buttons multiple times.
 - accessibility_user_agent: Validates WCAG compliance, screen reader navigation, keyboard-only interaction, high-contrast/zoom modes.
-- constrained_user_agent: Tests degraded-experience paths and responsive design for slow networks and small viewports.
 - data_heavy_user_agent: Uploads large files, creates thousands of records, uses long strings. Exposes performance cliffs.
 - returning_user_agent: Scenarios for returning users with stale sessions, cached pages, outdated bookmarks.
+- explorer_agent (autonomous): Open-ended chaos testing, cross-feature integration, edge cases, regression sweeps.
+
 
 Each mission has:
   - thread_id: A unique identifier namespaced to this PR (format: pr_{number}_{agent_type}_{nn})
-  - prompt: A detailed, actionable test instruction for the agent
+  - prompt: A concise, actionable test instruction for the agent (max 1200 chars)
 
 Output FORMAT (raw YAML, no code fences):
 
 missions:
-  - thread_id: "pr_123_listing_01"
+  - thread_id: "pr_123_new_user_01"
     prompt: >
       Navigate to ... verify ... interact with ...
 
 Rules:
 1. Generate 3-8 missions depending on the scope of changes.
-2. Each prompt MUST be specific and actionable, referencing concrete UI areas/flows.
-3. Map code changes to the MOST relevant agent type based on what UI pattern is affected.
+2. Each prompt MUST be concise, specific, and actionable, referencing concrete UI areas/flows.
+3. Map code changes to the MOST relevant remaining agent persona based on the user behavior or risk being tested.
 4. Include at least one explorer/autonomous mission for broad regression coverage.
 5. Thread IDs MUST follow the pattern: pr_{number}_{agenttype}_{nn}
-6. Use "explorer" or "autonomous" in thread_id for chaos-exploration missions.
+6. Use "accessibility", "data_heavy", "impatient", "returning", "explorer", "chaos", or "autonomous" in thread_id for advanced missions.
 7. Prompts should reference the specific features/areas that the code changes touch.
 8. Do NOT use placeholder values — use the actual app name and URL provided.
 9. Each prompt should tell the agent what page to navigate to, what to interact with, \
 and what to verify.
+10. Do not paste code diffs into mission prompts; mention only feature names, paths, or UI risks.
 """
 
 
 def _build_human_message(pr: PRData, app: AppMeta) -> str:
     file_list = _format_file_list(pr.files_changed)
+    diff_excerpt = _build_diff_excerpt(pr.diff)
     return (
         f"## Application Under Test\n"
         f"- Name: {app.name}\n"
         f"- URL: {app.url}\n"
-        f"- Description: {app.description}\n\n"
+        f"- Description: {_clip_for_prompt(app.description or '', 3000)}\n\n"
         f"## Pull Request #{pr.number}\n"
         f"- Title: {pr.title}\n"
         f"- URL: {pr.url}\n\n"
-        f"### PR Description\n{pr.body}\n\n"
+        f"### PR Description\n{_clip_for_prompt(pr.body, PR_PROMPT_BODY_BUDGET_CHARS)}\n\n"
         f"### Files Changed ({len(pr.files_changed)} files)\n{file_list}\n\n"
-        f"### Code Diff\n{pr.diff}\n\n"
+        f"### Code Diff Excerpt\n{diff_excerpt}\n\n"
         f"---\n\n"
         f"Based on these code changes, generate targeted test missions that cover the "
         f"UI areas most likely impacted. Focus on:\n"
@@ -416,6 +501,22 @@ def _validate_missions(data: Any, pr_number: int) -> dict:
             raise ValueError(f"Mission {i} missing 'thread_id' or 'prompt'")
         if not isinstance(m["thread_id"], str) or not isinstance(m["prompt"], str):
             raise ValueError(f"Mission {i} 'thread_id' and 'prompt' must be strings")
+        if len(m["prompt"]) > PR_GENERATED_MISSION_PROMPT_MAX_CHARS:
+            raise ValueError(
+                f"Mission {i} prompt exceeds {PR_GENERATED_MISSION_PROMPT_MAX_CHARS} chars"
+            )
+        thread_id = m["thread_id"].lower()
+        expected_prefix = f"pr_{pr_number}_"
+        if not thread_id.startswith(expected_prefix):
+            raise ValueError(
+                f"Mission {i} thread_id must be namespaced to PR #{pr_number} "
+                f"using prefix '{expected_prefix}': {m['thread_id']}"
+            )
+        thread_id_tokens = set(re.split(r"[^a-z0-9]+", thread_id))
+        if any(keyword in thread_id_tokens for keyword in _DELETED_PR_AGENT_KEYWORDS):
+            raise ValueError(f"Mission {i} uses a deleted agent in thread_id: {m['thread_id']}")
+        if not any(keyword in thread_id for keyword in _ALLOWED_PR_AGENT_KEYWORDS):
+            raise ValueError(f"Mission {i} does not target an allowed agent: {m['thread_id']}")
     return data
 
 
