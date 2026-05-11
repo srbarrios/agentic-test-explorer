@@ -1,22 +1,28 @@
 import asyncio
 import os
 import argparse
+import warnings
 import yaml
-from dotenv import load_dotenv
+from typing import Any
 
-from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langchain_core._api.deprecation import LangChainPendingDeprecationWarning
 
-from langchain_community.agent_toolkits import PlayWrightBrowserToolkit
+# Suppress library warnings before any imports that trigger them.
+warnings.filterwarnings(
+    "ignore",
+    category=LangChainPendingDeprecationWarning,
+    message=r".*allowed_objects.*",
+)
+
+from agentic_explorer.utils import console  # noqa: E402
+
+from langchain_core.messages import HumanMessage  # noqa: E402
+
 from playwright.async_api import async_playwright
 
-from langchain_core.globals import set_verbose
-
 from agentic_explorer.tools.browser.engine import get_action_tape
-from agentic_explorer.config import load_app_config
+from agentic_explorer.config import load_app_config, load_environment
 from agentic_explorer.utils.llm import make_llm
-
-set_verbose(True)
 
 from agentic_explorer.tools.common.custom_tools import (
     get_mcp_tools,
@@ -26,11 +32,37 @@ from agentic_explorer.tools.common.custom_tools import (
 from agentic_explorer.orchestration.standard_graph import build_graph
 from agentic_explorer.orchestration.advanced_graph import build_advanced_graph
 
-load_dotenv()
+load_environment()
 
 # Mission-type detection: thread_ids matching these substrings are routed to the
 # advanced (autonomous explorer) graph instead of the standard 5-agent UI swarm.
 ADVANCED_KEYWORDS = ("explorer", "chaos", "autonomous")
+
+
+def _get_async_sqlite_saver() -> Any:
+    """Import AsyncSqliteSaver while suppressing a known upstream pending warning."""
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    return AsyncSqliteSaver
+
+
+def _log_message_summary(msg) -> None:
+    """Print a compact one-line summary of a LangChain message to the console."""
+    content = msg.content
+    if isinstance(content, list):
+        content = "".join(
+            b.get("text", "") for b in content if isinstance(b, dict) and "text" in b
+        )
+    text = str(content).strip().replace("\n", " ")
+    if len(text) > 120:
+        text = text[:117] + "..."
+
+    tool_calls = getattr(msg, "tool_calls", None)
+    if tool_calls:
+        names = ", ".join(tc["name"] for tc in tool_calls)
+        console.info(f"{msg.type}: [{names}] {text[:80]}")
+    elif text:
+        console.info(f"{msg.type}: {text}")
 
 
 def _is_transient_error(exc: Exception) -> bool:
@@ -83,10 +115,10 @@ async def run_missions():
             parse_pr_url, fetch_pr_data, generate_missions_from_pr,
         )
         owner, repo, pr_number = parse_pr_url(args.pr_url)
-        print(f"\nFetching PR #{pr_number} from {owner}/{repo}...")
+        console.step(f"Fetching PR #{pr_number} from {owner}/{repo}...")
         pr_data = await fetch_pr_data(owner, repo, pr_number, mcp_config_path=cfg.paths.mcp_servers)
-        print(f"PR: {pr_data.title} ({len(pr_data.files_changed)} files changed)")
-        print("Generating targeted test scenarios with LLM...")
+        console.success(f"PR: {pr_data.title} ({len(pr_data.files_changed)} files changed)")
+        console.step("Generating targeted test scenarios with LLM...")
         generated = await generate_missions_from_pr(pr_data, cfg.app)
         pr_missions = generated.get("missions", [])
 
@@ -94,39 +126,40 @@ async def run_missions():
         output_path = os.path.join(args.output_dir, f"pr_{pr_number}.yaml")
         with open(output_path, 'w', encoding="utf-8") as f:
             yaml.dump(generated, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-        print(f"Generated {len(pr_missions)} missions -> {output_path}")
+        console.success(f"Generated {len(pr_missions)} missions -> {output_path}")
 
         if args.execute:
             missions.extend(pr_missions)
         elif not missions:
-            print("\nUse --execute to run generated missions, or --missions to run a file.")
+            console.info("Use --execute to run generated missions, or --missions to run a file.")
             return
 
     if not missions:
-        print("No missions found. Exiting.")
+        console.warn("No missions found. Exiting.")
         return
 
     if args.clear_memory:
-        print("\nCleaning up previous memory files...")
+        console.section("Clearing memory")
         for mem_file in ["agent_memory.sqlite", "agent_memory.sqlite-wal", "agent_memory.sqlite-shm"]:
             if os.path.exists(mem_file):
                 os.remove(mem_file)
-                print(f"  - Deleted {mem_file}")
+                console.info(f"Deleted {mem_file}")
 
-    print("Loading MCP server tools (if configured)...")
+    console.section("Setup")
+    console.step("Loading MCP server tools...")
     doc_tools = await get_mcp_tools(cfg.paths.mcp_servers)
     skill_tools = [fetch_agent_skill, run_agent_skill_script]
 
     skills_root = cfg.paths.skills_root or os.getenv("AGENT_SKILLS_ROOT", "./agent-skills")
     if not os.path.isdir(skills_root):
-        print(
-            f"  Skills directory '{skills_root}' not found. "
-            "Set AGENT_SKILLS_ROOT (or paths.skills_root in config.yaml) to a directory "
-            "containing skills following the https://agentskills.io/specification layout."
+        console.info(
+            f"Skills directory '{skills_root}' not found — skills disabled. "
+            "Set AGENT_SKILLS_ROOT or paths.skills_root in config.yaml."
         )
 
-    print("Initializing Authenticated Browser and Persistent Database...")
-    async with async_playwright() as playwright_instance, AsyncSqliteSaver.from_conn_string("agent_memory.sqlite") as memory_saver:
+    console.step("Initializing browser and database...")
+    async_sqlite_saver = _get_async_sqlite_saver()
+    async with async_playwright() as playwright_instance, async_sqlite_saver.from_conn_string("agent_memory.sqlite") as memory_saver:
         browser = await playwright_instance.chromium.launch(headless=not args.headed, args=["--start-maximized"])
 
         if not os.path.exists("auth.json"):
@@ -144,9 +177,10 @@ async def run_missions():
         # JSON intents via execute_browser_command, not Playwright calls directly.
         base_tools = doc_tools + skill_tools
 
-        print("Compiling LangGraph Swarms...")
+        console.step("Compiling LangGraph swarms...")
         standard_app = build_graph(base_tools, active_page, memory_saver, cfg.app, max_steps=args.max_steps)
         advanced_app = build_advanced_graph(base_tools, active_page, memory_saver, cfg.app, max_steps=args.max_steps)
+        console.success("Ready")
 
         for mission in missions:
             thread_id = str(mission["thread_id"])
@@ -156,7 +190,7 @@ async def run_missions():
             mission_type = "ADVANCED" if is_advanced else "STANDARD"
             app = advanced_app if is_advanced else standard_app
 
-            print(f"\n{'='*60}\nSTARTING MISSION [{mission_type}]: {thread_id}\n{'='*60}")
+            console.mission_start(thread_id, mission_type)
 
             os.makedirs(f"report_{thread_id}", exist_ok=True)
             with open(f"report_{thread_id}/traces.log", "w", encoding="utf-8") as f:
@@ -183,12 +217,12 @@ async def run_missions():
                 try:
                     async for output in app.astream(initial_state, config=run_config, stream_mode="updates"):
                         for node_name, state_update in output.items():
-                            header = f"\n{'='*40}\nSTATE UPDATE FROM: {node_name}\n{'='*40}\n"
-                            print(header)
+                            console.state_update(node_name)
 
                             if "messages" in state_update and state_update["messages"]:
                                 messages = state_update["messages"] if isinstance(state_update["messages"], list) else [state_update["messages"]]
 
+                                header = f"\nSTATE UPDATE FROM: {node_name}\n"
                                 with open(f"report_{thread_id}/traces.log", "a", encoding="utf-8") as trace_file:
                                     trace_file.write(header)
                                     for msg in messages:
@@ -196,24 +230,25 @@ async def run_missions():
                                             for block in msg.content:
                                                 if isinstance(block, dict) and "extras" in block:
                                                     del block["extras"]
-                                        msg.pretty_print()
                                         trace_file.write(msg.pretty_repr() + "\n")
+                                        _log_message_summary(msg)
+
+                            console.state_update_end()
                     break
                 except Exception as e:
                     if _is_transient_error(e):
                         if attempt < max_retries - 1:
                             delay = base_delay * (2 ** attempt)
-                            print(f"\nTransient error (attempt {attempt+1}/{max_retries}). Retrying in {delay}s...")
+                            console.retry(attempt + 1, max_retries, delay)
                             await asyncio.sleep(delay)
                             initial_state = None  # resume from checkpoint
                         else:
-                            print(f"\nFailed after {max_retries} attempts.")
+                            console.fail(f"Failed after {max_retries} attempts.")
                             raise
                     else:
                         raise
 
-            # Generate report
-            print(f"\nGenerating Mission Report for {thread_id}...")
+            console.step(f"Generating report for {thread_id}...")
             final_state = await app.aget_state(run_config)
             mission_history = final_state.values.get("messages", [])
             bugs_found = final_state.values.get("bugs_found", [])
@@ -265,10 +300,10 @@ async def run_missions():
                     if _is_transient_error(e):
                         if attempt < max_retries - 1:
                             delay = base_delay * (2 ** attempt)
-                            print(f"\nReport generation transient error. Retrying in {delay}s...")
+                            console.retry(attempt + 1, max_retries, delay)
                             await asyncio.sleep(delay)
                         else:
-                            print(f"\nReport generation failed after {max_retries} attempts.")
+                            console.fail(f"Report generation failed after {max_retries} attempts.")
                             raise
                     else:
                         raise
@@ -283,7 +318,7 @@ async def run_missions():
                 report_file.write(f"\n{clean_report_text}\n\n---\n")
 
             tape = get_action_tape(thread_id)
-            print(f"Action Tape: {len(tape)} deterministic steps recorded (see report_{thread_id}/action_tape.jsonl)")
+            console.mission_done(thread_id, len(tape), len(bugs_found))
             with open(f"report_{thread_id}/test_report.md", "a", encoding="utf-8") as report_file:
                 report_file.write(
                     f"\n## Action Tape\n\n"
@@ -293,7 +328,7 @@ async def run_missions():
                     f"- **Reproductions:** any `reproduction_*.spec.ts` in this folder can be run with `npx playwright test`.\n"
                 )
 
-        print("\nAll missions completed!")
+        console.final_summary(len(missions))
         await browser.close()
 
 def main():

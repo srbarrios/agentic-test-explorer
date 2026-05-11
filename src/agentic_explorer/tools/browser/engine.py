@@ -38,6 +38,8 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from playwright.async_api import Page
 
+from agentic_explorer.utils import console
+
 # ---------------------------------------------------------
 # Per-thread Action Tape store
 # ---------------------------------------------------------
@@ -59,7 +61,7 @@ def _append_tape(thread_id: str, entry: Dict[str, Any]) -> None:
         with open(_tape_path(thread_id), "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as exc:  # pragma: no cover - best-effort logging
-        print(f"[browser_engine] Failed to persist tape entry: {exc}")
+        console.warn(f"Failed to persist tape entry: {exc}")
 
 
 # ---------------------------------------------------------

@@ -8,6 +8,7 @@ auth.json
 .claude
 config.yaml
 mcp_servers.json
+report_*
 
 # Python build artifacts
 *.egg-info/

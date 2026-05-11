@@ -1,11 +1,11 @@
 import asyncio
 import os
 from playwright.async_api import async_playwright
-from dotenv import load_dotenv
 
-from agentic_explorer.config import load_app_config
+from agentic_explorer.config import load_app_config, load_environment
+from agentic_explorer.utils import console
 
-load_dotenv()
+load_environment()
 
 
 async def save_auth_state():
@@ -38,11 +38,10 @@ async def save_auth_state():
         context = await browser.new_context(no_viewport=True, ignore_https_errors=True)
         page = await context.new_page()
 
-        print(f"Navigating to {app_url} ...")
+        console.step(f"Navigating to {app_url}...")
         await page.goto(app_url)
 
-        # Wait for the login form to appear
-        print("Logging in...")
+        console.step("Logging in...")
         await page.wait_for_selector(username_selector)
 
         await page.fill(username_selector, username)
@@ -50,15 +49,14 @@ async def save_auth_state():
         await page.click(submit_selector)
 
         if cfg.auth.post_login_check:
-            print("Waiting for post-login element to confirm authentication...")
+            console.step("Waiting for post-login confirmation...")
             await page.wait_for_selector(cfg.auth.post_login_check, timeout=15000)
         else:
-            print("No auth.post_login_check configured; sleeping briefly to let session settle...")
+            console.info("No post_login_check configured — waiting for network idle.")
             await page.wait_for_load_state("networkidle", timeout=15000)
 
-        # Save the authentication state
         await context.storage_state(path="auth.json")
-        print("Authentication state saved successfully to auth.json!")
+        console.success("Auth state saved to auth.json")
 
         await browser.close()
 

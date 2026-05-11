@@ -17,6 +17,7 @@ from typing import Annotated, Any, Dict, List, Sequence, TypedDict
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agentic_explorer.tools.browser.engine import get_action_tape
+from agentic_explorer.utils import console
 from agentic_explorer.utils.llm import make_llm  # noqa: F401  re-exported for back-compat
 
 
@@ -143,9 +144,9 @@ def make_supervisor_node(llm, agent_names: tuple, app_url: str, max_steps: int):
         if reset_triggered:
             bugs = state.get("bugs_found", [])
             paths = list(dict.fromkeys(state.get("explored_paths", [])))[:6]
-            print(
-                f"\n⚠️  Step limit ({max_steps}) reached at step {current_step - 1}. "
-                f"Bugs so far: {len(bugs)}. Resetting..."
+            console.warn(
+                f"Step limit ({max_steps}) reached at step {current_step - 1}. "
+                f"Bugs so far: {len(bugs)}. Resetting to homepage."
             )
             reset_msg = HumanMessage(content=(
                 f"[STEP LIMIT — step {current_step - 1}/{max_steps}] "

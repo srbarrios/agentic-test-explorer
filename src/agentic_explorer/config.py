@@ -14,9 +14,32 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 import yaml
+from dotenv import load_dotenv
 
 
-_ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
+_ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)}")
+
+
+def _load_dotenv_file(dotenv_path: Path) -> None:
+    """Load a dotenv file if it exists, allowing project files to override blanks."""
+    if dotenv_path.is_file():
+        load_dotenv(dotenv_path=dotenv_path, override=True)
+
+
+def load_environment(config_path: Optional[str | Path] = None) -> None:
+    """Load environment variables from user-controlled project files.
+
+    ``python-dotenv``'s default discovery can start from the installed package
+    directory when this project is run as a console script. Explicitly loading
+    ``.env`` from the current working directory keeps ``agent-explorer`` aligned
+    with the directory where the user runs it. If a config path is already known,
+    also load a sibling ``.env`` so ``APP_CONFIG=/path/to/config.yaml`` works
+    from any directory.
+    """
+    _load_dotenv_file(Path.cwd() / ".env")
+
+    if config_path:
+        _load_dotenv_file(Path(config_path).expanduser().resolve().parent / ".env")
 
 
 def _interpolate(value: Any) -> Any:
@@ -81,7 +104,8 @@ def load_app_config(path: Optional[str | Path] = None) -> AppConfig:
     if the file does not exist, so the framework can still boot for users who
     configure everything via env vars alone.
     """
-    resolved = Path(path or os.getenv("APP_CONFIG", "./config.yaml"))
+    load_environment(path or os.getenv("APP_CONFIG"))
+    resolved = Path(path or os.getenv("APP_CONFIG", "./config.yaml")).expanduser()
     if not resolved.is_file():
         return AppConfig(app=AppMeta(url=os.getenv("APP_URL", "")))
 

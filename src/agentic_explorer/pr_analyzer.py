@@ -28,6 +28,7 @@ import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agentic_explorer.config import AppMeta
+from agentic_explorer.utils import console
 from agentic_explorer.utils.llm import make_llm
 from agentic_explorer.utils.llm_json import extract_yaml_text
 
@@ -124,7 +125,7 @@ async def _fetch_pr_data_mcp(
         raise RuntimeError("No GitHub MCP server configured")
 
     server_name = next(iter(server_entry))
-    print(f"  Connecting to GitHub MCP server '{server_name}'...")
+    console.step(f"Connecting to GitHub MCP server '{server_name}'...")
 
     client = MultiServerMCPClient(server_entry)
     tools = await client.get_tools()
@@ -169,7 +170,7 @@ async def _fetch_pr_data_mcp(
         diff = diff[:MAX_DIFF_CHARS] + (
             f"\n\n... [diff truncated at {MAX_DIFF_CHARS:,} chars; {total:,} total]"
         )
-        print(f"  Warning: PR diff truncated from {total:,} to {MAX_DIFF_CHARS:,} chars")
+        console.info(f"PR diff truncated from {total:,} to {MAX_DIFF_CHARS:,} chars")
 
     files_changed = _parse_files_text(files_text) if files_text else []
 
@@ -279,7 +280,7 @@ async def _fetch_pr_data_gh(owner: str, repo: str, number: int) -> PRData:
         diff = diff[:MAX_DIFF_CHARS] + (
             f"\n\n... [diff truncated at {MAX_DIFF_CHARS:,} chars; {total:,} total]"
         )
-        print(f"  Warning: PR diff truncated from {total:,} to {MAX_DIFF_CHARS:,} chars")
+        console.info(f"PR diff truncated from {total:,} to {MAX_DIFF_CHARS:,} chars")
 
     files_changed = []
     for f in meta.get("files", []) or []:
@@ -311,10 +312,10 @@ async def fetch_pr_data(
 ) -> PRData:
     """Fetch PR data, preferring the GitHub MCP server over the ``gh`` CLI."""
     try:
-        print("  Trying GitHub MCP server...")
+        console.step("Trying GitHub MCP server...")
         return await _fetch_pr_data_mcp(owner, repo, number, mcp_config_path)
     except Exception as mcp_err:
-        print(f"  GitHub MCP server unavailable ({mcp_err}), falling back to gh CLI...")
+        console.info(f"MCP unavailable ({mcp_err}), falling back to gh CLI...")
 
     return await _fetch_pr_data_gh(owner, repo, number)
 
@@ -446,7 +447,7 @@ async def generate_missions_from_pr(pr_data: PRData, app: AppMeta) -> dict:
         except Exception as e:
             if _is_transient_error(e) and attempt < max_retries - 1:
                 delay = base_delay * (2 ** attempt)
-                print(f"  Transient error during scenario generation. Retrying in {delay}s...")
+                console.retry(attempt + 1, max_retries, delay)
                 await asyncio.sleep(delay)
                 last_error = e
             else:
