@@ -49,6 +49,14 @@ graph TD
         S_Supervisor <--> S_Chart([Chart Agent]):::agent
         S_Supervisor <--> S_Map([Map Agent]):::agent
         S_Supervisor <--> S_Form([Form Agent]):::agent
+        S_Supervisor <--> S_New([New User Agent]):::agent
+        S_Supervisor <--> S_Power([Power User Agent]):::agent
+        S_Supervisor <--> S_Adv([Adversarial User Agent]):::agent
+        S_Supervisor <--> S_Imp([Impatient User Agent]):::agent
+        S_Supervisor <--> S_Acc([Accessibility User Agent]):::agent
+        S_Supervisor <--> S_Con([Constrained User Agent]):::agent
+        S_Supervisor <--> S_Data([Data Heavy User Agent]):::agent
+        S_Supervisor <--> S_Ret([Returning User Agent]):::agent
     end
 
     subgraph ATS [Advanced Testing Swarm]
@@ -77,7 +85,7 @@ graph TD
 1. **Mission Dispatcher (`main.py`)**: Loads `missions/*.yaml` files and provisions the
    correct graph network based on `thread_id` naming conventions
    (`explorer` / `chaos` / `autonomous` route to the advanced graph; everything else to the
-   standard 5-agent swarm). Can also accept a `--pr-url` to auto-generate missions from a
+   standard 13-agent swarm). Can also accept a `--pr-url` to auto-generate missions from a
    GitHub Pull Request via `pr_analyzer.py`.
 2. **Supervisor-Worker Flow**: A Supervisor node dynamically evaluates the workspace state
    and dispatches control to specialized worker nodes.
@@ -112,7 +120,7 @@ graph TD
 - `src/agentic_explorer/utils/llm_json.py` — YAML/JSON extraction helpers for LLM responses
 - `src/agentic_explorer/orchestration/graph_base.py` — shared graph infrastructure
   (`AgentState`, node factories, tool filtering)
-- `src/agentic_explorer/orchestration/standard_graph.py` — 5 UI-pattern specialist agents
+- `src/agentic_explorer/orchestration/standard_graph.py` — 13 standard QA agents (5 specialists, 8 personas)
 - `src/agentic_explorer/orchestration/advanced_graph.py` — autonomous explorer agent
 - `src/agentic_explorer/tools/browser/engine.py` — Record-and-Translate browser engine
 - `src/agentic_explorer/tools/common/custom_tools.py` — vision, screenshot, MCP loader,
@@ -123,8 +131,8 @@ graph TD
 ## ✨ Key Features
 
 * **Product-Agnostic**: One small `config.yaml` adapts the framework to any web app.
-* **UI-Pattern Specialist Agents**: Five specialists (listing, graph, chart, map, form)
-  + an autonomous explorer — each prompted around a UI pattern, not a product feature.
+* **UI-Pattern Specialist & Persona Agents**: Thirteen standard QA agents (UI-pattern specialists and behavioral personas)
+  + an autonomous explorer — each prompted around a specific testing strategy.
 * **Record-and-Translate Engine**: Agents emit JSON intents, the deterministic engine
   executes and records every step to an immutable Action Tape. Every bug automatically
   generates a reproducible `reproduction_*.spec.ts` Playwright script.
@@ -327,36 +335,37 @@ your app's login form.
 ### Defining Missions
 
 Missions live in `missions/*.yaml`. See [`missions/README.md`](missions/README.md) for the
-schema and writing guide. Two templates ship in the repo:
+schema and writing guide. Fourteen templates ship in the repo, one for each defined agent persona:
 
-- [`missions/smoke.yaml`](missions/smoke.yaml) — five generic UI-pattern smoke tests
-- [`missions/autonomous_exploration.yaml`](missions/autonomous_exploration.yaml) — chaos
-  exploration
+- [`missions/listing_agent.yaml`](missions/listing_agent.yaml)
+- [`missions/form_agent.yaml`](missions/form_agent.yaml)
+- [`missions/explorer_agent.yaml`](missions/explorer_agent.yaml)
+- etc.
 
-Both contain placeholders (`<YOUR_APP>`, `<APP_URL>`, `<example_search_term>`, …) — fill
+All of them contain placeholders (`<YOUR_APP>`, `<APP_URL>`, `<example_search_term>`, …) — fill
 them in for your application before running.
 
 ### Running Missions from YAML
 
 ```bash
-# Standard 5-agent UI swarm (uses auto-detected provider — Claude by default)
-agent-explorer --missions missions/smoke.yaml
+# Standard 13-agent QA swarm (uses auto-detected provider — Claude by default)
+agent-explorer --missions missions/listing_agent.yaml
 
 # Explicitly choose a provider
-agent-explorer --missions missions/smoke.yaml --provider claude
-agent-explorer --missions missions/smoke.yaml --provider gemini
+agent-explorer --missions missions/form_agent.yaml --provider claude
+agent-explorer --missions missions/form_agent.yaml --provider gemini
 
 # Autonomous exploration (visible browser recommended)
-agent-explorer --missions missions/autonomous_exploration.yaml --headed
+agent-explorer --missions missions/explorer_agent.yaml --headed
 
 # Clear agent memory to restart fresh
-agent-explorer --missions missions/smoke.yaml --clear-memory
+agent-explorer --missions missions/listing_agent.yaml --clear-memory
 
 # Override the supervisor step limit (default: 30)
-agent-explorer --missions missions/smoke.yaml --max-steps 50
+agent-explorer --missions missions/listing_agent.yaml --max-steps 50
 
 # Suppress verbose ReAct console output (traces.log still captures everything)
-agent-explorer --missions missions/smoke.yaml --quiet
+agent-explorer --missions missions/listing_agent.yaml --quiet
 ```
 
 ### PR-Driven Test Generation
@@ -379,7 +388,7 @@ agent-explorer --pr-url https://github.com/org/repo/pull/123 --execute --headed
 agent-explorer --pr-url https://github.com/org/repo/pull/123 --output-dir ./pr-missions
 
 # Combine with existing missions
-agent-explorer --missions missions/smoke.yaml --pr-url https://github.com/org/repo/pull/123 --execute
+agent-explorer --missions missions/listing_agent.yaml --pr-url https://github.com/org/repo/pull/123 --execute
 ```
 
 The analyzer extracts the PR title, description, file list, and full code diff, then sends

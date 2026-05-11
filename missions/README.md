@@ -20,7 +20,7 @@ missions:
   start fresh.
 * **Routing keywords**: if `thread_id` contains any of `explorer`, `chaos`, or
   `autonomous`, the mission is dispatched to the **advanced** graph (autonomous
-  exploration). Otherwise it runs on the **standard** 5-agent UI swarm.
+  exploration). Otherwise it runs on the **standard** 13-agent UI swarm.
 
 ### `prompt`
 
