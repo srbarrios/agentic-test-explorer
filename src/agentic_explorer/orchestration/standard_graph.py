@@ -23,7 +23,7 @@ from agentic_explorer.orchestration.graph_base import (
 # Swarm Graph Builder
 # ---------------------------------------------------------
 
-def build_graph(base_tools: list, active_page: Page, checkpointer, app: AppMeta, max_steps: int = 30):
+def build_graph(base_tools: list, active_page: Page, checkpointer, app: AppMeta, max_steps: int = 30, quiet: bool = False):
     """Build the standard QA swarm of 5 UI-pattern specialist agents.
 
     Args:
@@ -147,7 +147,7 @@ def build_graph(base_tools: list, active_page: Page, checkpointer, app: AppMeta,
 
     workflow = StateGraph(AgentState)  # type: ignore[arg-type]
     workflow.add_node("Supervisor", make_supervisor_node(llm, tuple(agent_registry), app_url, max_steps))  # type: ignore[arg-type]
-    for name, agent in agent_registry.items():
-        workflow.add_node(name, make_agent_node(agent))  # type: ignore[arg-type]
+    for agent_name, agent in agent_registry.items():
+        workflow.add_node(agent_name, make_agent_node(agent, name=agent_name, quiet=quiet))  # type: ignore[arg-type]
 
     return compile_swarm(workflow, agent_registry, checkpointer)

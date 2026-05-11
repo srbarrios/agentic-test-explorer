@@ -23,8 +23,6 @@ def _claude_vertex_config() -> Optional[dict]:
     """Return Vertex AI config if ~/.claude/settings.json declares Vertex usage, else None.
 
     Reads the file directly — does NOT inject env vars into os.environ.
-    'global' is a Claude Code routing alias, not a real GCP region; falls
-    back to ANTHROPIC_VERTEX_REGION (default: us-east5).
     """
     settings = _load_claude_settings()
     env_section = settings.get("env", {}) or {}
@@ -32,8 +30,6 @@ def _claude_vertex_config() -> Optional[dict]:
         return None
     project_id = env_section.get("ANTHROPIC_VERTEX_PROJECT_ID") or os.getenv("ANTHROPIC_VERTEX_PROJECT_ID")
     location = env_section.get("CLOUD_ML_REGION") or os.getenv("CLOUD_ML_REGION", "us-east5")
-    if location == "global":
-        location = os.getenv("ANTHROPIC_VERTEX_REGION", "us-east5")
     if not project_id:
         return None
     return {"project_id": project_id, "location": location}
@@ -108,6 +104,7 @@ def _make_claude_llm(temperature: float, model_name: Optional[str]) -> Any:
             project=vertex_cfg["project_id"],
             location=vertex_cfg["location"],
             temperature=temperature,
+            max_retries=0,
         )
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -138,3 +135,20 @@ def make_llm(
     if resolved == "claude":
         return _make_claude_llm(temperature, model_name)
     raise ValueError(f"Unknown provider '{resolved}'. Use 'gemini' or 'claude'.")
+
+
+def get_model_name(llm: Any) -> str:
+    """Return a human-readable model identifier for any provider returned by make_llm()."""
+    for attr in ("model", "model_name", "model_id"):
+        value = getattr(llm, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return "unknown"
+
+
+def get_active_provider() -> str:
+    """Return the resolved provider name (gemini|claude). Wraps _detect_provider."""
+    try:
+        return _detect_provider()
+    except RuntimeError:
+        return os.getenv("LLM_PROVIDER", "unknown").lower() or "unknown"

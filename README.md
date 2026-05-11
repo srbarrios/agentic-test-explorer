@@ -162,12 +162,12 @@ Python 3.11+ is required. A virtual environment is highly recommended.
 python -m venv .venv
 source .venv/bin/activate
 
-# Install all dependencies
-pip install -r requirements.txt
+# Install the package and all dependencies (editable mode)
+pip install -e .
 
 # Or, if you use uv (recommended — much faster):
 uv venv
-uv pip install -r requirements.txt
+uv pip install -e .
 
 # Install the Playwright Chromium browser
 playwright install chromium
@@ -178,10 +178,10 @@ playwright install chromium
 >
 > ```bash
 > # pip
-> pip install -r requirements.txt
+> pip install -e .
 >
 > # uv
-> uv pip install -r requirements.txt
+> uv pip install -e .
 > ```
 
 ### 2. Environment Variables
@@ -271,7 +271,9 @@ paths:
 llm:
   # provider: claude              # or: gemini
   # claude_model: claude-sonnet-4-6
+  # claude_vision_model: claude-haiku-4-5
   # gemini_model: gemini-2.5-flash
+  # gemini_vision_model: gemini-2.5-flash
 ```
 
 ### 4. (Optional) MCP Servers
@@ -352,6 +354,9 @@ agent-explorer --missions missions/smoke.yaml --clear-memory
 
 # Override the supervisor step limit (default: 30)
 agent-explorer --missions missions/smoke.yaml --max-steps 50
+
+# Suppress verbose ReAct console output (traces.log still captures everything)
+agent-explorer --missions missions/smoke.yaml --quiet
 ```
 
 ### PR-Driven Test Generation

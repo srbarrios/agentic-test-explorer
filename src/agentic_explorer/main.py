@@ -16,13 +16,15 @@ warnings.filterwarnings(
 
 from agentic_explorer.utils import console  # noqa: E402
 
-from langchain_core.messages import HumanMessage  # noqa: E402
+from langchain_core.messages import (  # noqa: E402
+    HumanMessage, AIMessage, AIMessageChunk, ToolMessage, SystemMessage,
+)
 
 from playwright.async_api import async_playwright
 
 from agentic_explorer.tools.browser.engine import get_action_tape
 from agentic_explorer.config import load_app_config, load_environment
-from agentic_explorer.utils.llm import make_llm
+from agentic_explorer.utils.llm import make_llm, get_model_name, get_active_provider
 
 from agentic_explorer.tools.common.custom_tools import (
     get_mcp_tools,
@@ -65,9 +67,54 @@ def _log_message_summary(msg) -> None:
         console.info(f"{msg.type}: {text}")
 
 
+def _strip_extras(msg) -> None:
+    """Remove the noisy 'extras' block from list-content messages in place."""
+    if isinstance(msg.content, list):
+        for block in msg.content:
+            if isinstance(block, dict) and "extras" in block:
+                del block["extras"]
+
+
+def _message_text(msg) -> str:
+    """Flatten BaseMessage.content (list-of-blocks or str) to plain text."""
+    content = msg.content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict) and "text" in b)
+    return str(content)
+
+
+def _summarize_tool_args(tool_call: dict, max_chars: int = 80) -> str:
+    """Return a compact one-line summary of a tool_call args dict."""
+    import json
+    args = tool_call.get("args") or {}
+    if not isinstance(args, dict):
+        text = str(args)
+    elif "action" in args:
+        # execute_browser_command JSON-intent shape — surface action+key fields cleanly.
+        parts = [f"action={args['action']}"]
+        for key in ("selector", "url", "value", "key"):
+            if args.get(key):
+                val = str(args[key])
+                if len(val) > 40:
+                    val = val[:37] + "..."
+                parts.append(f"{key}={val!r}")
+        text = " ".join(parts)
+    else:
+        try:
+            text = json.dumps(args, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(args)
+    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+
+
 def _is_transient_error(exc: Exception) -> bool:
     msg = str(exc).upper()
     return any(x in msg for x in ("503", "UNAVAILABLE", "429", "RATE_LIMIT", "RESOURCE_EXHAUSTED", "QUOTA"))
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    msg = str(exc).upper()
+    return any(x in msg for x in ("429", "RATE_LIMIT", "RESOURCE_EXHAUSTED", "QUOTA"))
 
 
 async def run_missions():
@@ -83,21 +130,39 @@ async def run_missions():
         "--provider", type=str, default=None, choices=["gemini", "claude"],
         help="LLM provider to use — overrides LLM_PROVIDER env var and config.yaml",
     )
+    parser.add_argument(
+        "--quiet", action="store_true",
+        help="Suppress real-time ReAct THOUGHT/ACTION/OBSERV console output (traces.log still captures everything)",
+    )
     args = parser.parse_args()
 
-    # Apply --provider before the credential probe so it validates the right provider.
+    # Load config.yaml early so its llm section can seed env var defaults.
+    cfg = load_app_config()
+
+    # Apply config.yaml llm values as env-var defaults (env vars & --provider win).
+    _llm_defaults = {
+        "LLM_PROVIDER": cfg.llm.provider,
+        "CLAUDE_MODEL": cfg.llm.claude_model,
+        "GEMINI_MODEL": cfg.llm.gemini_model,
+        "CLAUDE_VISION_MODEL": cfg.llm.claude_vision_model,
+        "GEMINI_VISION_MODEL": cfg.llm.gemini_vision_model,
+    }
+    for key, val in _llm_defaults.items():
+        if val:
+            os.environ.setdefault(key, val)
+
+    # --provider overrides both env var and config.yaml.
     if args.provider:
         os.environ["LLM_PROVIDER"] = args.provider
 
     try:
-        make_llm(temperature=0)  # early credential probe — raises RuntimeError with clear message
+        probe_llm = make_llm(temperature=0)  # early credential probe — raises RuntimeError with clear message
     except RuntimeError as exc:
         raise ValueError(str(exc)) from exc
+    console.model_info(get_active_provider(), get_model_name(probe_llm))
 
     if not args.missions and not args.pr_url:
         parser.error("At least one of --missions or --pr-url is required")
-
-    cfg = load_app_config()
     if not cfg.app.url:
         raise ValueError(
             "App URL is not configured. Set APP_URL in .env or app.url in config.yaml."
@@ -178,8 +243,8 @@ async def run_missions():
         base_tools = doc_tools + skill_tools
 
         console.step("Compiling LangGraph swarms...")
-        standard_app = build_graph(base_tools, active_page, memory_saver, cfg.app, max_steps=args.max_steps)
-        advanced_app = build_advanced_graph(base_tools, active_page, memory_saver, cfg.app, max_steps=args.max_steps)
+        standard_app = build_graph(base_tools, active_page, memory_saver, cfg.app, max_steps=args.max_steps, quiet=args.quiet)
+        advanced_app = build_advanced_graph(base_tools, active_page, memory_saver, cfg.app, max_steps=args.max_steps, quiet=args.quiet)
         console.success("Ready")
 
         for mission in missions:
@@ -215,30 +280,82 @@ async def run_missions():
 
             for attempt in range(max_retries):
                 try:
-                    async for output in app.astream(initial_state, config=run_config, stream_mode="updates"):
-                        for node_name, state_update in output.items():
-                            console.state_update(node_name)
+                    seen_message_ids: set[str] = set()
+                    trace_path = f"report_{thread_id}/traces.log"
+                    current_node: str | None = None
 
-                            if "messages" in state_update and state_update["messages"]:
-                                messages = state_update["messages"] if isinstance(state_update["messages"], list) else [state_update["messages"]]
+                    async for mode, payload in app.astream(
+                        initial_state,
+                        config=run_config,
+                        stream_mode=["updates", "messages"],
+                    ):
+                        if mode == "updates":
+                            # payload: {node_name: state_update}
+                            for node_name, state_update in payload.items():
+                                if current_node is not None:
+                                    console.state_update_end()
+                                current_node = node_name
+                                console.state_update(node_name)
 
-                                header = f"\nSTATE UPDATE FROM: {node_name}\n"
-                                with open(f"report_{thread_id}/traces.log", "a", encoding="utf-8") as trace_file:
-                                    trace_file.write(header)
-                                    for msg in messages:
-                                        if isinstance(msg.content, list):
-                                            for block in msg.content:
-                                                if isinstance(block, dict) and "extras" in block:
-                                                    del block["extras"]
-                                        trace_file.write(msg.pretty_repr() + "\n")
-                                        _log_message_summary(msg)
+                                if "messages" in state_update and state_update["messages"]:
+                                    messages = state_update["messages"] if isinstance(state_update["messages"], list) else [state_update["messages"]]
+                                    with open(trace_path, "a", encoding="utf-8") as trace_file:
+                                        trace_file.write(f"\nSTATE UPDATE FROM: {node_name}\n")
+                                        for msg in messages:
+                                            _strip_extras(msg)
+                                            msg_id = getattr(msg, "id", None)
+                                            if msg_id and msg_id in seen_message_ids:
+                                                continue
+                                            if msg_id:
+                                                seen_message_ids.add(msg_id)
+                                            trace_file.write(msg.pretty_repr() + "\n")
 
-                            console.state_update_end()
+                        elif mode == "messages":
+                            msg, meta = payload
+                            node_name = meta.get("langgraph_node") or current_node or "?"
+
+                            # Skip mid-stream chunks — wait for the final assembled message.
+                            if isinstance(msg, AIMessageChunk):
+                                continue
+                            # Skip system prompt messages — they are static boilerplate.
+                            if isinstance(msg, SystemMessage):
+                                continue
+
+                            msg_id = getattr(msg, "id", None)
+                            if msg_id and msg_id in seen_message_ids:
+                                continue
+                            if msg_id:
+                                seen_message_ids.add(msg_id)
+
+                            _strip_extras(msg)
+
+                            # Console: ReAct lines (compact when --quiet).
+                            _max = 120 if args.quiet else 500
+                            if isinstance(msg, AIMessage):
+                                text = _message_text(msg)
+                                if text.strip():
+                                    console.react_thought(node_name, text, max_chars=_max)
+                            elif isinstance(msg, HumanMessage):
+                                text = _message_text(msg)
+                                if text.strip():
+                                    console.info(f"HUMAN: {text[:120]}")
+
+                            # Trace file: full pretty_repr for every message (regardless of --quiet).
+                            with open(trace_path, "a", encoding="utf-8") as trace_file:
+                                trace_file.write(f"\n[{node_name}] {msg.__class__.__name__}\n")
+                                trace_file.write(msg.pretty_repr() + "\n")
+
+                    if current_node is not None:
+                        console.state_update_end()
                     break
                 except Exception as e:
                     if _is_transient_error(e):
                         if attempt < max_retries - 1:
-                            delay = base_delay * (2 ** attempt)
+                            if _is_rate_limit(e):
+                                delay = max(30, base_delay * (4 ** attempt))
+                                console.warn(f"Rate limit hit: {str(e)[:120]}")
+                            else:
+                                delay = base_delay * (2 ** attempt)
                             console.retry(attempt + 1, max_retries, delay)
                             await asyncio.sleep(delay)
                             initial_state = None  # resume from checkpoint
@@ -299,7 +416,11 @@ async def run_missions():
                 except Exception as e:
                     if _is_transient_error(e):
                         if attempt < max_retries - 1:
-                            delay = base_delay * (2 ** attempt)
+                            if _is_rate_limit(e):
+                                delay = max(30, base_delay * (4 ** attempt))
+                                console.warn(f"Rate limit hit: {str(e)[:120]}")
+                            else:
+                                delay = base_delay * (2 ** attempt)
                             console.retry(attempt + 1, max_retries, delay)
                             await asyncio.sleep(delay)
                         else:
