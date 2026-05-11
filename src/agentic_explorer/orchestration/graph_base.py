@@ -14,7 +14,7 @@ import operator
 import re
 from typing import Annotated, Any, Dict, List, Sequence, TypedDict
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agentic_explorer.tools.browser.engine import get_action_tape
 from agentic_explorer.utils import console
@@ -85,23 +85,79 @@ def _extract_paths(messages: Sequence[BaseMessage]) -> List[str]:
 
 
 # ---------------------------------------------------------
+# ReAct console helpers (used inside agent nodes)
+# ---------------------------------------------------------
+
+def _msg_text(msg: BaseMessage) -> str:
+    content = msg.content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict) and "text" in b)
+    return str(content)
+
+
+def _summarize_tool_args(tool_call: dict, max_chars: int = 80) -> str:
+    import json
+    args = tool_call.get("args") or {}
+    if not isinstance(args, dict):
+        text = str(args)
+    elif "action" in args:
+        parts = [f"action={args['action']}"]
+        for key in ("selector", "url", "value", "key"):
+            if args.get(key):
+                val = str(args[key])
+                if len(val) > 40:
+                    val = val[:37] + "..."
+                parts.append(f"{key}={val!r}")
+        text = " ".join(parts)
+    else:
+        try:
+            text = json.dumps(args, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(args)
+    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+
+
+def _print_react(msg: BaseMessage, node_name: str, max_chars: int) -> None:
+    if isinstance(msg, SystemMessage):
+        return
+    if isinstance(msg, AIMessage):
+        text = _msg_text(msg)
+        if text.strip():
+            console.react_thought(node_name, text, max_chars=max_chars)
+    elif isinstance(msg, HumanMessage):
+        text = _msg_text(msg)
+        if text.strip():
+            console.info(f"HUMAN: {text[:120]}")
+
+
+# ---------------------------------------------------------
 # Node factories
 # ---------------------------------------------------------
 
-def make_agent_node(agent):
-    """Return an async LangGraph node function that runs a compiled agent.
+def make_agent_node(agent, *, name: str = "agent", quiet: bool = False):
+    """Return an async LangGraph node function that streams agent messages in real-time.
 
-    Tracks Action Tape growth per invocation so only new entries are appended
-    to the shared state. Also extracts bug captures and navigated paths so the
-    supervisor has full exploration context on the next step.
+    Uses ``astream`` internally so THOUGHT / ACTION / OBSERV lines appear on the
+    console as the inner agent produces them, rather than batching at node completion.
     """
+    _max = 120 if quiet else 500
+
     async def _node(state: AgentState, config=None) -> dict:
         thread_id = (
             (config or {}).get("configurable", {}).get("thread_id", "default")
             if config else "default"
         )
         before = len(get_action_tape(thread_id))
-        out = await agent.ainvoke(state, config=config) if config else await agent.ainvoke(state)
+
+        out: dict = {}
+        seen_count = 0
+        async for snapshot in agent.astream(state, config=config):
+            out = snapshot
+            messages = snapshot.get("messages", [])
+            for msg in messages[seen_count:]:
+                _print_react(msg, name, _max)
+            seen_count = len(messages)
+
         new_messages: Sequence[BaseMessage] = out.get("messages", [])
         new_tape = list(get_action_tape(thread_id)[before:])
         return {
@@ -134,7 +190,7 @@ def make_supervisor_node(llm, agent_names: tuple, app_url: str, max_steps: int):
         },
         "required": ["next"],
     }
-    routing_llm = llm.with_structured_output(schema=routing_schema)
+    routing_llm = llm.with_structured_output(schema=routing_schema, method="function_calling")
 
     async def supervisor_node(state: AgentState) -> dict:
         current_step = state.get("step_count", 0) + 1
@@ -174,8 +230,9 @@ def make_supervisor_node(llm, agent_names: tuple, app_url: str, max_steps: int):
         )
 
         messages_for_routing = list(state["messages"]) + extra_messages
+        routing_request = HumanMessage(content="Based on the progress above, which agent should act next?")
         decision = await routing_llm.ainvoke(
-            [SystemMessage(content=supervisor_prompt), *messages_for_routing]
+            [SystemMessage(content=supervisor_prompt), *messages_for_routing, routing_request]
         )
 
         result: dict = {"next_agent": decision["next"], "step_count": current_step}

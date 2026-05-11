@@ -105,6 +105,41 @@ def state_update_end() -> None:
     print(f"  {_dim('└──')}")
 
 
+def model_info(provider: str, model: str) -> None:
+    """Print the active LLM provider and model identifier."""
+    label = _bold(_cyan("LLM"))
+    print(f"  {label} {_bold(provider)} {_dim('·')} {model}")
+
+
+# ── ReAct streaming helpers ──────────────────────────────────────────────
+
+def react_thought(node_name: str, text: str, max_chars: int = 500) -> None:
+    """Print an agent's thought (AIMessage content, no tool calls)."""
+    if not text:
+        return
+    text = text.strip().replace("\n", " ")
+    if len(text) > max_chars:
+        text = text[: max_chars - 3] + "..."
+    label = _cyan("💭")
+    print(f"  {label} {_bold(node_name)} {text}")
+
+
+def react_action(node_name: str, tool_name: str, args_summary: str = "") -> None:
+    """Print an agent's tool call (action) with a brief arg summary."""
+    label = _bold(_yellow("ACTION "))
+    suffix = f" {_dim(args_summary)}" if args_summary else ""
+    print(f"  {label} {_dim(node_name)} {_bold(tool_name)}{suffix}")
+
+
+def react_observation(node_name: str, tool_name: str, content: str, max_chars: int = 500) -> None:
+    """Print a tool result (observation) truncated to one short line."""
+    text = content.strip().replace("\n", " ")
+    if len(text) > max_chars:
+        text = text[: max_chars - 3] + "..."
+    label = _bold(_green("OBSERV "))
+    print(f"  {label} {_dim(node_name)} {_dim(f'[{tool_name}]')} {text}")
+
+
 def mission_start(thread_id: str, mission_type: str) -> None:
     badge = _green(f"[{mission_type}]") if mission_type == "STANDARD" else _magenta(f"[{mission_type}]")
     banner(f"MISSION {badge} {thread_id}")
