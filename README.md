@@ -158,16 +158,31 @@ graph TD
 Python 3.11+ is required. A virtual environment is highly recommended.
 
 ```bash
-python -m venv venv
-source venv/bin/activate
+# Create and activate a virtual environment (plain venv or uv)
+python -m venv .venv
+source .venv/bin/activate
 
+# Install all dependencies
 pip install -r requirements.txt
-# Or with uv:
-# uv sync
+
+# Or, if you use uv (recommended — much faster):
+uv venv
+uv pip install -r requirements.txt
 
 # Install the Playwright Chromium browser
 playwright install chromium
 ```
+
+> **Keeping dependencies up to date:** After pulling new changes, always re-sync your
+> virtual environment to pick up any added or updated packages:
+>
+> ```bash
+> # pip
+> pip install -r requirements.txt
+>
+> # uv
+> uv pip install -r requirements.txt
+> ```
 
 ### 2. Environment Variables
 

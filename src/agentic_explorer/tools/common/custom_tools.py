@@ -22,6 +22,8 @@ from langchain_core.runnables import RunnableConfig
 from dotenv import load_dotenv
 load_dotenv()
 
+from agentic_explorer.utils import console
+
 # --- Vision Model Setup ---
 _provider = os.getenv("LLM_PROVIDER", "").lower()
 _VISION_MODEL_NAME = (
@@ -32,7 +34,7 @@ try:
     from agentic_explorer.utils.llm import make_llm
     vision_model = make_llm(temperature=0, model_name=_VISION_MODEL_NAME)
 except Exception as e:
-    print(f"Error initializing vision model: {e}")
+    console.warn(f"Vision model unavailable: {e}")
     vision_model = None
 
 # ---------------------------------------------------------
@@ -59,26 +61,26 @@ async def get_mcp_tools(config_path: Optional[Union[str, Path]] = None) -> list:
     """
     resolved = Path(config_path or os.getenv("MCP_SERVERS_CONFIG", "./mcp_servers.json"))
     if not resolved.is_file():
-        print(f"ℹ️  No MCP server config found at {resolved}. Skipping MCP tools.")
+        console.info(f"No MCP config at {resolved} — skipping MCP tools.")
         return []
 
     try:
         with open(resolved, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except Exception as exc:
-        print(f"⚠️  Failed to read MCP config {resolved}: {exc}")
+        console.warn(f"Failed to read MCP config {resolved}: {exc}")
         return []
 
     servers = data.get("mcpServers") or {}
     if not servers:
-        print(f"ℹ️  MCP config {resolved} contains no servers. Skipping MCP tools.")
+        console.info(f"MCP config {resolved} has no servers — skipping MCP tools.")
         return []
 
     try:
         client = MultiServerMCPClient(servers)
         return await client.get_tools()
     except Exception as exc:
-        print(f"⚠️  Failed to connect to MCP servers from {resolved}: {exc}")
+        console.warn(f"MCP server connection failed: {exc}")
         return []
 
 
@@ -313,7 +315,7 @@ def get_visual_validation_tool(page: Page):
         if not vision_model:
             return "Error: Visual validation model is not available."
 
-        print(f"Executing visual analysis with context: '{validation_context}'...")
+        console.step(f"Visual analysis: {validation_context[:60]}")
         screenshot_bytes = await page.screenshot(full_page=False)
 
         try:

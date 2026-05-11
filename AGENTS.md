@@ -127,7 +127,8 @@ The framework is configured through three user-supplied files (templates ship as
 ## Running the System
 
 ### Initial Setup
-1. **Install dependencies**: `pip install -r requirements.txt` (or `uv sync`). Key packages:
+1. **Install dependencies**: `pip install -r requirements.txt` (or `uv pip install -r requirements.txt`).
+   Re-run this after every `git pull` to pick up new or updated packages. Key packages:
    `langchain`, `langchain-anthropic`, `langchain-google-genai`, `langchain-google-vertexai`,
    `langgraph`, `playwright`, `python-dotenv`, `pyyaml`, `pillow`, `langchain-mcp-adapters`,
    `langgraph-checkpoint-sqlite`, `aiosqlite`, `httpx`.
