@@ -71,12 +71,37 @@ The generated missions follow the standard YAML format and are routed to agents 
 
 ### State Management
 * **Persistent Memory**: State is persisted via an SQLite checkpointer (`agent_memory.sqlite`),
-  keyed by the `thread_id`.
-* **Mission Isolation**: Each mission has a unique `thread_id` to isolate its memory; reusing a
-  thread ID resumes the prior context.
+  keyed by the `thread_id`. A companion `AsyncSqliteStore` (sharing the same SQLite file)
+  provides cross-session memory.
+* **Mission Isolation**: Each mission has a unique `thread_id` to isolate its checkpoints;
+  reusing a thread ID resumes the prior context. Use `--clear-checkpoints` to reset
+  checkpoints while preserving learned memory, `--clear-learned` for the inverse, or
+  `--clear-all` for both.
 * **`AgentState`**: A unified state `TypedDict` that carries `messages`,
-  `next_agent`, `step_count`, `action_tape` (an append-only list of recorded browser
-  commands), `bugs_found`, and `explored_paths`.
+  `next_agent`, `step_count`, `action_tape` (bounded to 50 entries in state; full log
+  persisted to JSONL on disk), `bugs_found`, and `explored_paths`.
+* **Message Summarization**: A `Summarizer` node between agents and the Supervisor
+  compresses old messages to prevent unbounded state growth. Keeps the first HumanMessage
+  (mission prompt) and the 20 most recent messages; messages in between are replaced with
+  a deterministic compact summary.
+* **Cross-Session Memory** (`src/agentic_explorer/memory.py`): Four levels of memory backed
+  by the LangGraph Store:
+  - **Semantic** — page knowledge, selector reliability tracking, application quirks.
+    Written automatically on every agent turn from action tape entries.
+  - **Episodic** — session summaries, deduplicated bug catalog. Written after each mission
+    completes. Agents query past findings via the `recall_past_findings` tool.
+  - **Procedural** — per-agent prompt supplements and supervisor routing rules. Generated
+    via LLM reflection after each batch; read at graph construction time to evolve agent
+    prompts and routing strategy.
+  - **Prioritization** — risk-scored page ranking (bug density, selector flakiness, quirk
+    count). Injected into supervisor routing context automatically.
+
+  Namespace layout:
+  ```
+  ("app", "{url_hash}", "pages"|"selectors"|"quirks")
+  ("episodes", "{url_hash}", "sessions"|"bugs")
+  ("procedures", "{url_hash}", "agent_prompts"|"routing_rules")
+  ```
 
 ## Configuration Surface
 The framework is configured through three user-supplied files (templates ship as
@@ -126,6 +151,9 @@ The framework is configured through three user-supplied files (templates ship as
 * **Screenshots & Reproductions**: The screenshot tool captures full-page bug evidence and
   is thread-aware via `RunnableConfig`. The browser engine translates Action Tape entries
   into reproducible Playwright specs.
+* **Memory Recall** (`recall_past_findings` in `src/agentic_explorer/memory.py`): Agents
+  can call this tool to query the bug catalog, session history, and quirks for a page area.
+  Added to agent tool bundles automatically when a store is available.
 
 ## Running the System
 
@@ -146,17 +174,27 @@ Execute missions defined in YAML format (see `missions/README.md`):
 * **Standard Run**: `agent-explorer --missions missions/new_user_agent.yaml`
 * **Explicit Provider**: `agent-explorer --missions missions/power_user_agent.yaml --provider claude`
 * **Headed Mode** (Debugging): `agent-explorer --missions missions/accessibility_user_agent.yaml --headed`
-* **Clear Memory**: `agent-explorer --missions missions/new_user_agent.yaml --clear-memory`
+* **Clear All Memory**: `agent-explorer --missions missions/new_user_agent.yaml --clear-all`
+* **Clear Checkpoints Only**: `agent-explorer --missions missions/new_user_agent.yaml --clear-checkpoints`
+  (preserves learned memory: pages, bugs, procedures)
+* **Clear Learned Only**: `agent-explorer --missions missions/new_user_agent.yaml --clear-learned`
+  (preserves checkpoints for resume)
 * **Custom Step Limit**: `agent-explorer --missions missions/new_user_agent.yaml --max-steps 50`
   (default: 30; supervisor resets to the app homepage on limit and tries a new strategy)
 
 PR-driven test generation (prefers GitHub MCP server; falls back to [`gh` CLI](https://cli.github.com/)):
 * **Generate Only**: `agent-explorer --pr-url https://github.com/org/repo/pull/123`
-  — writes `missions/pr_123.yaml`
+  — writes `missions/pr_123.yaml`; injects historical bug data when available
 * **Generate + Execute**: `agent-explorer --pr-url https://github.com/org/repo/pull/123 --execute --headed`
 * **Custom Output Dir**: `agent-explorer --pr-url <url> --output-dir ./pr-missions`
 * **Combined**: `agent-explorer --missions missions/new_user_agent.yaml --pr-url <url> --execute`
   — runs both hand-written and auto-generated missions
+
+Regression testing and model export:
+* **Regression**: `agent-explorer --regression --headed`
+  — auto-generates missions from the bug catalog targeting known open bugs
+* **Export Model**: `agent-explorer --export-model`
+  — exports discovered app structure as `app_model.json` (no browser needed)
 
 ## Output Artifacts
 Every mission generates artifacts localized in a `report_<thread_id>/` directory:
@@ -188,8 +226,17 @@ Every mission generates artifacts localized in a `report_<thread_id>/` directory
     3. Semantic HTML / visible text → `button:has-text('Save')`, `text='Apply'`
     * **Forbidden**: XPath (`//div`), positional CSS (`:nth-child(3)`,
       `div > span:nth-of-type(2)`). Always call `get_dom_snapshot` first.
+* **Graph Builders Are Async**: `build_graph()` and `build_advanced_graph()` are `async`
+  functions (they read procedural memory from the store at construction time). Always
+  `await` them.
+* **Memory Module**: All cross-session memory logic lives in `src/agentic_explorer/memory.py`.
+  Do not scatter store reads/writes across other files — add new memory functions there and
+  import them. Store namespace conventions: `("app", hash, ...)` for semantic,
+  `("episodes", hash, ...)` for episodic, `("procedures", hash, ...)` for procedural.
 * **Agent Modification**: If adding a new agent, you must update the system prompt, tool
   bundle, agent registry, supervisor descriptions, and routing keywords when applicable.
+  The agent will automatically receive procedural memory supplements if the store has
+  entries for its name.
 * **Mission Modifications**: If adding a new advanced mission category, update both the
   mission `thread_id` naming and the `ADVANCED_KEYWORDS` tuple in `main.py`.
 * **PR Analyzer Modifications**: The PR scenario generation prompt is in
