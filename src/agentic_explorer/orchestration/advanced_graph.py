@@ -17,6 +17,7 @@ from agentic_explorer.tools.browser.engine import (
     get_dom_snapshot_tool,
     get_code_generator_tool,
 )
+from agentic_explorer.memory import app_url_hash, get_recall_tool, get_agent_prompt_supplement, get_routing_rules_supplement
 from agentic_explorer.orchestration.graph_base import (
     AgentState,
     filter_base_tools,
@@ -33,7 +34,7 @@ from agentic_explorer.orchestration.graph_base import (
 # Advanced Swarm Graph Builder
 # ---------------------------------------------------------
 
-def build_advanced_graph(base_tools: list, active_page: Page, checkpointer, app: AppMeta, max_steps: int = 30, quiet: bool = False):
+async def build_advanced_graph(base_tools: list, active_page: Page, checkpointer, app: AppMeta, max_steps: int = 30, quiet: bool = False, store=None):
     """Build the advanced persona and autonomous exploration graph.
 
     Args:
@@ -42,6 +43,7 @@ def build_advanced_graph(base_tools: list, active_page: Page, checkpointer, app:
         checkpointer: LangGraph checkpoint backend (SQLite saver).
         app: App metadata (name, url, description) injected into agent prompts.
         max_steps: Supervisor reset threshold.
+        store: Optional LangGraph Store for cross-session memory.
     """
     llm = make_llm(temperature=0)
 
@@ -52,6 +54,8 @@ def build_advanced_graph(base_tools: list, active_page: Page, checkpointer, app:
         f" The application under test is '{app_name}', accessible at {app_url}."
         + (f" Domain context: {app_description}" if app_description else "")
     )
+
+    url_hash = app_url_hash(app_url)
 
     bug_screenshot = get_screenshot_tool(page=active_page)
     execute_browser_command = get_browser_command_tool(page=active_page)
@@ -64,51 +68,54 @@ def build_advanced_graph(base_tools: list, active_page: Page, checkpointer, app:
         bug_screenshot,
         generate_reproduction_spec,
     ]
+    if store:
+        advanced_tools.append(get_recall_tool(store, url_hash))
 
     domain_line = f"Domain context: {app_description}\n\n" if app_description else ""
 
-    accessibility_user_agent = create_agent(llm, tools=advanced_tools, system_prompt=SystemMessage(content=make_browser_agent_prompt(
-        "the Accessibility User Persona",
-        app_context,
-        "Test keyboard-only navigation, focus order, semantic structure, labels, high-contrast/zoom behavior, and WCAG-oriented outcomes.",
-    )))
+    agent_focuses = {
+        "accessibility_user_agent": (
+            "the Accessibility User Persona",
+            "Test keyboard-only navigation, focus order, semantic structure, labels, high-contrast/zoom behavior, and WCAG-oriented outcomes.",
+        ),
+        "data_heavy_user_agent": (
+            "the Data-Heavy User Persona",
+            "Use large files, many records, long strings, nested data, large result sets, and boundary inputs to expose performance cliffs and pagination bugs.",
+        ),
+        "impatient_user_agent": (
+            "the Impatient User Persona",
+            "Cancel mid-flight, refresh during submissions, click repeatedly, navigate away during async work, and rapidly change filters to expose races.",
+        ),
+        "returning_user_agent": (
+            "the Returning User Persona",
+            "Simulate stale sessions, cached pages, outdated bookmarks, expired tokens, and journeys resumed after time away.",
+        ),
+    }
 
-    data_heavy_user_agent = create_agent(llm, tools=advanced_tools, system_prompt=SystemMessage(content=make_browser_agent_prompt(
-        "the Data-Heavy User Persona",
-        app_context,
-        "Use large files, many records, long strings, nested data, large result sets, and boundary inputs to expose performance cliffs and pagination bugs.",
-    )))
+    agent_registry = {}
+    for agent_name, (role, focus) in agent_focuses.items():
+        if store:
+            supplement = await get_agent_prompt_supplement(store, url_hash, agent_name)
+            if supplement:
+                focus = f"{focus}\n\n{supplement}"
+        agent_registry[agent_name] = create_agent(llm, tools=advanced_tools, system_prompt=SystemMessage(content=make_browser_agent_prompt(
+            role, app_context, focus,
+        )))
 
-    impatient_user_agent = create_agent(llm, tools=advanced_tools, system_prompt=SystemMessage(content=make_browser_agent_prompt(
-        "the Impatient User Persona",
-        app_context,
-        "Cancel mid-flight, refresh during submissions, click repeatedly, navigate away during async work, and rapidly change filters to expose races.",
-    )))
-
-    returning_user_agent = create_agent(llm, tools=advanced_tools, system_prompt=SystemMessage(content=make_browser_agent_prompt(
-        "the Returning User Persona",
-        app_context,
-        "Simulate stale sessions, cached pages, outdated bookmarks, expired tokens, and journeys resumed after time away.",
-    )))
-
-    explorer_prompt = SystemMessage(content=(
+    # Explorer agent uses a custom prompt (not make_browser_agent_prompt)
+    explorer_focus = (
         "You are the Autonomous Explorer Agent chasing unreproducible incidents. "
         f"Application: '{app_name}' at {app_url}. {domain_line}"
         "Explore chaotically across distinct areas: filters, dropdowns, toggles, cross-links, "
         "long lists, forms, settings, boundary inputs, rapid clicks, refreshes, and combined filters. "
         "After significant interactions call check_page_health. Vary entry points and avoid repetitive paths. "
         + BROWSER_AGENT_RULES
-    ))
-
-    explorer_agent = create_agent(llm, tools=advanced_tools, system_prompt=explorer_prompt)
-
-    agent_registry = {
-        "accessibility_user_agent": accessibility_user_agent,
-        "data_heavy_user_agent": data_heavy_user_agent,
-        "impatient_user_agent": impatient_user_agent,
-        "returning_user_agent": returning_user_agent,
-        "explorer_agent": explorer_agent,
-    }
+    )
+    if store:
+        supplement = await get_agent_prompt_supplement(store, url_hash, "explorer_agent")
+        if supplement:
+            explorer_focus = f"{explorer_focus}\n\n{supplement}"
+    agent_registry["explorer_agent"] = create_agent(llm, tools=advanced_tools, system_prompt=SystemMessage(content=explorer_focus))
 
     agent_descriptions = """
 - accessibility_user_agent: Validates WCAG-oriented behavior, screen reader navigation, focus order, and keyboard-only interaction.
@@ -118,9 +125,14 @@ def build_advanced_graph(base_tools: list, active_page: Page, checkpointer, app:
 - explorer_agent: Autonomous chaos exploration across features, integrations, edge cases, and regression sweeps.
 """
 
-    workflow = StateGraph(AgentState)  # type: ignore[arg-type]
-    workflow.add_node("Supervisor", make_supervisor_node(llm, tuple(agent_registry), app_url, max_steps, agent_descriptions))  # type: ignore[arg-type]
-    for agent_name, agent in agent_registry.items():
-        workflow.add_node(agent_name, make_agent_node(agent, name=agent_name, quiet=quiet))  # type: ignore[arg-type]
+    if store:
+        routing_supplement = await get_routing_rules_supplement(store, url_hash)
+        if routing_supplement:
+            agent_descriptions = f"{agent_descriptions}\n{routing_supplement}"
 
-    return compile_swarm(workflow, agent_registry, checkpointer)
+    workflow = StateGraph(AgentState)  # type: ignore[arg-type]
+    workflow.add_node("Supervisor", make_supervisor_node(llm, tuple(agent_registry), app_url, max_steps, agent_descriptions, app_url_hash=url_hash))  # type: ignore[arg-type]
+    for agent_name, agent in agent_registry.items():
+        workflow.add_node(agent_name, make_agent_node(agent, name=agent_name, quiet=quiet, app_url_hash=url_hash))  # type: ignore[arg-type]
+
+    return compile_swarm(workflow, agent_registry, checkpointer, store=store)

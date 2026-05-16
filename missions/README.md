@@ -16,8 +16,9 @@ missions:
 
 * Must be unique per run. It keys the persistent SQLite checkpoint and the artifact
   directory (`report_<thread_id>/`).
-* Reusing the same `thread_id` resumes the prior conversation. Pass `--clear-memory` to
-  start fresh.
+* Reusing the same `thread_id` resumes the prior conversation. Pass `--clear-checkpoints`
+  to reset checkpoints while keeping learned memory, `--clear-learned` for the inverse,
+  or `--clear-all` to wipe everything.
 * **Routing keywords**: if `thread_id` contains any of `accessibility`, `a11y`,
   `data_heavy`, `data-heavy`, `impatient`, `returning`, `explorer`, `chaos`, or
   `autonomous`, the mission is dispatched to the **advanced** graph. Otherwise it
@@ -62,3 +63,24 @@ missions:
    in the `thread_id`; for autonomous exploration, use `explorer`, `chaos`, or `autonomous`.
 
 Each supported agent has a generic mission template named `<agent>.yaml` in this folder to help you get started.
+
+## Regression missions
+
+Instead of writing missions manually, you can auto-generate them from the bug catalog:
+
+```bash
+agent-explorer --regression --headed
+```
+
+This queries the cross-session bug catalog for open bugs and historically flaky areas,
+generates missions targeting those pages, and runs them. Agents receive the
+`recall_past_findings` tool to query past bugs, sessions, and quirks for any page area
+before testing it.
+
+## Cross-session memory
+
+Agents learn across sessions. After each mission, the framework records session summaries
+and bug fingerprints. After each batch, an LLM reflection step generates prompt supplements
+and routing rule refinements. On subsequent runs, agents receive learned context (effective
+strategies, things to avoid, known page structures) and the supervisor routes based on
+risk-scored page prioritization.

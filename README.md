@@ -41,7 +41,7 @@ graph TD
 
     Main -->|Standard Missions| S_Supervisor{QA Supervisor}:::supervisor
     Main -->|Advanced Missions| A_Supervisor{Adv. Supervisor}:::supervisor
-    Main -->|Checkpoints| DB[(SQLite Memory)]:::db
+    Main -->|Checkpoints + Store| DB[(SQLite Memory)]:::db
 
     subgraph SQA [Standard QA Swarm]
         S_Supervisor <-->|Routes & Returns| S_New([New User Agent]):::agent
@@ -100,7 +100,16 @@ graph TD
    The framework ships zero hardcoded MCP servers or skills — bring your own.
 5. **State & Memory (`agent_memory.sqlite`)**: An asynchronous SQLite checkpointer
    remembers agent states (including the `action_tape` field), allowing a reused
-   `thread_id` to resume precisely where it left off.
+   `thread_id` to resume precisely where it left off. A companion **LangGraph Store**
+   provides four levels of cross-session memory:
+   - **Semantic** — page knowledge, selector reliability, application quirks
+   - **Episodic** — session summaries, deduplicated bug catalog
+   - **Procedural** — self-improving agent prompts and routing rules (LLM-reflected)
+   - **Prioritization** — risk-scored page ranking injected into supervisor routing
+
+   Agents can query past findings at runtime via the `recall_past_findings` tool.
+   The supervisor receives a `MEMORY_CONTEXT` section with known pages, bugs, quirks,
+   and high-risk areas on every routing cycle.
 
 ### Source Layout
 
@@ -116,6 +125,9 @@ graph TD
   (`AgentState`, node factories, tool filtering)
 - `src/agentic_explorer/orchestration/standard_graph.py` — 3 standard QA personas
 - `src/agentic_explorer/orchestration/advanced_graph.py` — 4 advanced personas plus autonomous explorer
+- `src/agentic_explorer/memory.py` — cross-session memory: semantic (pages, selectors,
+  quirks), episodic (session summaries, bug catalog), procedural (self-improving prompts),
+  recall tool, regression mission generation, app model export, test prioritization
 - `src/agentic_explorer/tools/browser/engine.py` — Record-and-Translate browser engine
 - `src/agentic_explorer/tools/common/custom_tools.py` — screenshot, MCP loader,
   Skills tools
@@ -142,11 +154,23 @@ graph TD
 * **Bring-Your-Own Skills**: Install Agent Skills (per the
   [agentskills.io](https://agentskills.io/specification) spec) under `AGENT_SKILLS_ROOT`
   and the framework exposes them automatically.
+* **Cross-Session Learning**: A four-level memory system (semantic, episodic, procedural,
+  prioritization) lets agents learn across sessions. The framework remembers page
+  structures, selector reliability, application quirks, past bugs, and which testing
+  strategies worked. Agent prompts and supervisor routing rules self-improve via
+  post-batch LLM reflection.
+* **Regression Testing**: Run `--regression` to auto-generate missions from the bug
+  catalog — no YAML needed. The framework targets pages with known open bugs and
+  historically flaky areas.
+* **Application Model Export**: Run `--export-model` to export the discovered application
+  structure (pages, selectors with reliability scores, bugs, quirks, session stats) as
+  `app_model.json`.
 * **PR-Driven Test Generation**: Pass a GitHub PR URL (`--pr-url`) and the framework
   extracts the diff (preferring the GitHub MCP server, falling back to `gh` CLI), sends
   it to an LLM, and auto-generates targeted mission YAML covering the UI areas impacted
-  by the code changes. Optionally execute the generated missions immediately with
-  `--execute`.
+  by the code changes. When historical bug data exists, it's injected into the LLM
+  prompt for better-targeted missions. Optionally execute the generated missions
+  immediately with `--execute`.
 * **Automated Artifact Generation**: Every test produces an isolated folder containing
   raw execution traces, the Action Tape, bug screenshots, reproducible `.spec.ts` files,
   and an executive Markdown report.
@@ -359,14 +383,33 @@ agent-explorer --missions missions/accessibility_user_agent.yaml --headed
 # Autonomous exploration (visible browser recommended)
 agent-explorer --missions missions/explorer_agent.yaml --headed
 
-# Clear agent memory to restart fresh
-agent-explorer --missions missions/new_user_agent.yaml --clear-memory
+# Clear all memory (checkpoints + learned knowledge) to restart fresh
+agent-explorer --missions missions/new_user_agent.yaml --clear-all
+
+# Clear only checkpoints (preserves learned memory: pages, bugs, procedures)
+agent-explorer --missions missions/new_user_agent.yaml --clear-checkpoints
+
+# Clear only learned memory (preserves checkpoints for resume)
+agent-explorer --missions missions/new_user_agent.yaml --clear-learned
 
 # Override the supervisor step limit (default: 30)
 agent-explorer --missions missions/new_user_agent.yaml --max-steps 50
 
 # Suppress verbose ReAct console output (traces.log still captures everything)
 agent-explorer --missions missions/new_user_agent.yaml --quiet
+```
+
+### Regression Testing & Model Export
+
+```bash
+# Auto-generate and run missions targeting known bugs (no --missions needed)
+agent-explorer --regression --headed
+
+# Combine regression with manual missions
+agent-explorer --missions missions/new_user_agent.yaml --regression
+
+# Export discovered app structure as JSON
+agent-explorer --export-model
 ```
 
 ### PR-Driven Test Generation

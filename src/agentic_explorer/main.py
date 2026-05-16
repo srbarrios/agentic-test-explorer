@@ -163,7 +163,10 @@ async def run_missions():
     parser.add_argument("--execute", action="store_true", help="Execute generated PR missions immediately (default: generate only)")
     parser.add_argument("--output-dir", type=str, default="missions", help="Directory for generated mission files (default: missions/)")
     parser.add_argument("--headed", action="store_true", help="Run browser with visible UI")
-    parser.add_argument("--clear-memory", action="store_true", help="Delete the previous SQLite memory database")
+    parser.add_argument("--clear-memory", action="store_true", help="[Deprecated] Alias for --clear-all. Delete the entire SQLite memory database")
+    parser.add_argument("--clear-checkpoints", action="store_true", help="Clear only LangGraph checkpoints (mission state). Preserves learned memory (pages, bugs, procedures)")
+    parser.add_argument("--clear-learned", action="store_true", help="Clear only learned memory (semantic, episodic, procedural). Preserves checkpoints for resume")
+    parser.add_argument("--clear-all", action="store_true", help="Delete the entire SQLite memory database (checkpoints + learned memory)")
     parser.add_argument("--max-steps", type=int, default=30, help="Maximum LangGraph execution steps per mission before resetting to homepage (default: 30)")
     parser.add_argument(
         "--provider", type=str, default=None, choices=["gemini", "claude"],
@@ -172,6 +175,14 @@ async def run_missions():
     parser.add_argument(
         "--quiet", action="store_true",
         help="Suppress real-time ReAct THOUGHT/ACTION/OBSERV console output (traces.log still captures everything)",
+    )
+    parser.add_argument(
+        "--regression", action="store_true",
+        help="Auto-generate regression missions from the bug catalog (no --missions needed)",
+    )
+    parser.add_argument(
+        "--export-model", action="store_true",
+        help="Export discovered application model from memory store as JSON",
     )
     args = parser.parse_args()
 
@@ -200,8 +211,8 @@ async def run_missions():
         raise ValueError(str(exc)) from exc
     console.model_info(get_active_provider(), get_model_name(probe_llm))
 
-    if not args.missions and not args.pr_url:
-        parser.error("At least one of --missions or --pr-url is required")
+    if not args.missions and not args.pr_url and not args.regression and not args.export_model:
+        parser.error("At least one of --missions, --pr-url, --regression, or --export-model is required")
     if not cfg.app.url:
         raise ValueError(
             "App URL is not configured. Set APP_URL in .env or app.url in config.yaml."
@@ -223,7 +234,16 @@ async def run_missions():
         pr_data = await fetch_pr_data(owner, repo, pr_number, mcp_config_path=cfg.paths.mcp_servers)
         console.success(f"PR: {pr_data.title} ({len(pr_data.files_changed)} files changed)")
         console.step("Generating targeted test scenarios with LLM...")
-        generated = await generate_missions_from_pr(pr_data, cfg.app)
+        _pr_store = None
+        if os.path.exists("agent_memory.sqlite"):
+            from langgraph.store.sqlite import AsyncSqliteStore as _PRStore
+            _pr_store_ctx = _PRStore.from_conn_string("agent_memory.sqlite")
+            _pr_store = await _pr_store_ctx.__aenter__()
+        try:
+            generated = await generate_missions_from_pr(pr_data, cfg.app, store=_pr_store)
+        finally:
+            if _pr_store is not None:
+                await _pr_store_ctx.__aexit__(None, None, None)
         pr_missions = generated.get("missions", [])
 
         os.makedirs(args.output_dir, exist_ok=True)
@@ -238,16 +258,83 @@ async def run_missions():
             console.info("Use --execute to run generated missions, or --missions to run a file.")
             return
 
-    if not missions:
-        console.warn("No missions found. Exiting.")
-        return
-
-    if args.clear_memory:
-        console.section("Clearing memory")
+    _clear_all = args.clear_all or args.clear_memory
+    if _clear_all:
+        console.section("Clearing all memory")
         for mem_file in ["agent_memory.sqlite", "agent_memory.sqlite-wal", "agent_memory.sqlite-shm"]:
             if os.path.exists(mem_file):
                 os.remove(mem_file)
                 console.info(f"Deleted {mem_file}")
+    elif args.clear_checkpoints or args.clear_learned:
+        import sqlite3
+        db_path = "agent_memory.sqlite"
+        if os.path.exists(db_path):
+            console.section("Selective memory clearing")
+            conn = sqlite3.connect(db_path)
+            try:
+                if args.clear_checkpoints:
+                    for table in ("checkpoints", "checkpoint_writes", "checkpoint_blobs"):
+                        try:
+                            conn.execute(f"DELETE FROM {table}")
+                            console.info(f"Cleared table: {table}")
+                        except sqlite3.OperationalError:
+                            pass
+                    conn.commit()
+                    console.success("Checkpoints cleared (learned memory preserved)")
+                if args.clear_learned:
+                    try:
+                        conn.execute("DELETE FROM store")
+                        conn.commit()
+                        console.success("Learned memory cleared (checkpoints preserved)")
+                    except sqlite3.OperationalError:
+                        console.warn("No store table found")
+            finally:
+                conn.close()
+        else:
+            console.info("No memory database to clear")
+
+    # Handle --export-model (standalone operation, no browser needed)
+    if args.export_model:
+        import json
+        from langgraph.store.sqlite import AsyncSqliteStore as _ExportStore
+        from agentic_explorer.memory import app_url_hash as _exp_hash, export_app_model
+
+        if not os.path.exists("agent_memory.sqlite"):
+            console.warn("No memory database found. Run missions first to build the app model.")
+            return
+        async with _ExportStore.from_conn_string("agent_memory.sqlite") as _store:
+            _hash = _exp_hash(cfg.app.url)
+            model = await export_app_model(_store, _hash)
+            output_path = "app_model.json"
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(model, f, indent=2, default=str)
+            console.success(f"Application model exported to {output_path}")
+            page_count = len(model.get("pages", []))
+            bug_count = len(model.get("bugs", []))
+            console.info(f"  Pages: {page_count}, Bugs: {bug_count}, Selectors: {len(model.get('selectors', []))}")
+        if not missions and not args.regression:
+            return
+
+    # Handle --regression (generate missions from bug catalog)
+    if args.regression:
+        from langgraph.store.sqlite import AsyncSqliteStore as _RegStore
+        from agentic_explorer.memory import app_url_hash as _reg_hash, generate_regression_missions
+
+        if not os.path.exists("agent_memory.sqlite"):
+            console.warn("No memory database found. Run missions first to build the bug catalog.")
+            return
+        async with _RegStore.from_conn_string("agent_memory.sqlite") as _store:
+            _hash = _reg_hash(cfg.app.url)
+            regression_missions = await generate_regression_missions(_store, _hash)
+            if regression_missions:
+                console.success(f"Generated {len(regression_missions)} regression missions from bug catalog")
+                missions.extend(regression_missions)
+            else:
+                console.warn("No open bugs found in catalog. Nothing to regress.")
+
+    if not missions:
+        console.warn("No missions found. Exiting.")
+        return
 
     console.section("Setup")
     console.step("Loading MCP server tools...")
@@ -261,9 +348,14 @@ async def run_missions():
             "Set AGENT_SKILLS_ROOT or paths.skills_root in config.yaml."
         )
 
-    console.step("Initializing browser and database...")
+    console.step("Initializing browser, database, and memory store...")
     async_sqlite_saver = _get_async_sqlite_saver()
-    async with async_playwright() as playwright_instance, async_sqlite_saver.from_conn_string("agent_memory.sqlite") as memory_saver:
+    from langgraph.store.sqlite import AsyncSqliteStore
+    async with (
+        async_playwright() as playwright_instance,
+        async_sqlite_saver.from_conn_string("agent_memory.sqlite") as memory_saver,
+        AsyncSqliteStore.from_conn_string("agent_memory.sqlite") as memory_store,
+    ):
         browser = await playwright_instance.chromium.launch(headless=not args.headed, args=["--start-maximized"])
 
         if not os.path.exists("auth.json"):
@@ -282,8 +374,8 @@ async def run_missions():
         base_tools = doc_tools + skill_tools
 
         console.step("Compiling LangGraph swarms...")
-        standard_app = build_graph(base_tools, active_page, memory_saver, cfg.app, max_steps=args.max_steps, quiet=args.quiet)
-        advanced_app = build_advanced_graph(base_tools, active_page, memory_saver, cfg.app, max_steps=args.max_steps, quiet=args.quiet)
+        standard_app = await build_graph(base_tools, active_page, memory_saver, cfg.app, max_steps=args.max_steps, quiet=args.quiet, store=memory_store)
+        advanced_app = await build_advanced_graph(base_tools, active_page, memory_saver, cfg.app, max_steps=args.max_steps, quiet=args.quiet, store=memory_store)
         console.success("Ready")
 
         for mission in missions:
@@ -478,6 +570,19 @@ async def run_missions():
                 report_file.write(f"\n{clean_report_text}\n\n---\n")
 
             tape = get_action_tape(thread_id)
+
+            # Write episodic memory (session summary + bug catalog)
+            try:
+                from agentic_explorer.memory import app_url_hash, write_episode_memory
+                url_hash = app_url_hash(cfg.app.url)
+                await write_episode_memory(
+                    memory_store, url_hash, thread_id,
+                    prompt, tape, bugs_found,
+                    final_state.values.get("explored_paths", []),
+                )
+            except Exception:
+                pass
+
             console.mission_done(thread_id, len(tape), len(bugs_found))
             with open(f"report_{thread_id}/test_report.md", "a", encoding="utf-8") as report_file:
                 report_file.write(
@@ -487,6 +592,15 @@ async def run_missions():
                     f"- **Tape log:** `action_tape.jsonl`\n"
                     f"- **Reproductions:** any `reproduction_*.spec.ts` in this folder can be run with `npx playwright test`.\n"
                 )
+
+        # Post-batch: update procedural memory via LLM reflection
+        try:
+            from agentic_explorer.memory import app_url_hash as _url_hash_fn, update_procedural_memory
+            _batch_url_hash = _url_hash_fn(cfg.app.url)
+            _reflection_llm = make_llm(temperature=0)
+            await update_procedural_memory(memory_store, _batch_url_hash, _reflection_llm)
+        except Exception:
+            pass
 
         console.final_summary(len(missions))
         await browser.close()

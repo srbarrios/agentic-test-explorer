@@ -465,9 +465,12 @@ and what to verify.
 """
 
 
-def _build_human_message(pr: PRData, app: AppMeta) -> str:
+def _build_human_message(pr: PRData, app: AppMeta, bug_context: str = "") -> str:
     file_list = _format_file_list(pr.files_changed)
     diff_excerpt = _build_diff_excerpt(pr.diff)
+    bug_section = ""
+    if bug_context:
+        bug_section = f"\n### Historical Bug Data\n{bug_context}\n"
     return (
         f"## Application Under Test\n"
         f"- Name: {app.name}\n"
@@ -478,13 +481,15 @@ def _build_human_message(pr: PRData, app: AppMeta) -> str:
         f"- URL: {pr.url}\n\n"
         f"### PR Description\n{_clip_for_prompt(pr.body, PR_PROMPT_BODY_BUDGET_CHARS)}\n\n"
         f"### Files Changed ({len(pr.files_changed)} files)\n{file_list}\n\n"
-        f"### Code Diff Excerpt\n{diff_excerpt}\n\n"
+        f"### Code Diff Excerpt\n{diff_excerpt}\n"
+        f"{bug_section}\n"
         f"---\n\n"
         f"Based on these code changes, generate targeted test missions that cover the "
         f"UI areas most likely impacted. Focus on:\n"
         f"1. Direct functional changes (features added/modified by this PR)\n"
         f"2. Adjacent areas that could regress from these changes\n"
         f"3. Integration points between the changed code and existing features\n"
+        + ("4. Areas with historically known bugs (see Historical Bug Data above)\n" if bug_context else "")
     )
 
 
@@ -525,13 +530,37 @@ def _is_transient_error(exc: Exception) -> bool:
     return any(x in msg for x in ("503", "UNAVAILABLE", "429", "RATE_LIMIT", "RESOURCE_EXHAUSTED", "QUOTA"))
 
 
-async def generate_missions_from_pr(pr_data: PRData, app: AppMeta) -> dict:
-    """Use an LLM to generate targeted test missions from PR data."""
+async def generate_missions_from_pr(pr_data: PRData, app: AppMeta, store=None) -> dict:
+    """Use an LLM to generate targeted test missions from PR data.
+
+    Args:
+        pr_data: Parsed PR metadata (title, body, diff, files).
+        app: Application metadata (name, url, description).
+        store: Optional LangGraph Store for injecting historical bug data.
+    """
     model_name = os.getenv("SCENARIO_MODEL") or os.getenv("GEMINI_SCENARIO_MODEL") or None
     llm = make_llm(temperature=0, model_name=model_name)
 
+    bug_context = ""
+    if store and app.url:
+        try:
+            from agentic_explorer.memory import app_url_hash
+            url_hash = app_url_hash(app.url)
+            bugs = await store.asearch(("episodes", url_hash, "bugs"), limit=15)
+            if bugs:
+                bug_lines = []
+                for b in sorted(bugs, key=lambda x: x.value.get("seen_count", 0), reverse=True):
+                    v = b.value
+                    bug_lines.append(
+                        f"- [{v.get('page', '?')}] {v.get('summary', '?')[:200]} "
+                        f"(seen {v.get('seen_count', 1)}x, status: {v.get('status', 'open')})"
+                    )
+                bug_context = "These areas have been historically buggy:\n" + "\n".join(bug_lines[:10])
+        except Exception:
+            pass
+
     system_msg = SystemMessage(content=_SYSTEM_PROMPT)
-    human_msg = HumanMessage(content=_build_human_message(pr_data, app))
+    human_msg = HumanMessage(content=_build_human_message(pr_data, app, bug_context=bug_context))
 
     max_retries = 3
     base_delay = 2
