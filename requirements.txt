@@ -170,7 +170,7 @@ langchain==1.2.15
     # via agentic-test-explorer (pyproject.toml)
 langchain-anthropic==1.4.3
     # via agentic-test-explorer (pyproject.toml)
-langchain-classic==1.0.3
+langchain-classic==1.0.7
     # via langchain-community
 langchain-community==0.4.1
     # via agentic-test-explorer (pyproject.toml)
