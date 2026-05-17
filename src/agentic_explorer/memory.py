@@ -1,16 +1,18 @@
 """Cross-session memory for the agentic test explorer.
 
 Provides utilities for semantic, episodic, and procedural memory backed by
-a LangGraph Store (AsyncSqliteStore or compatible).
+a LangGraph Store (AsyncSqliteStore or compatible).  Procedural memory
+reflection and agent observation management are powered by the Langmem SDK.
 
 Namespace layout:
-  ("app", "{app_url_hash}", "pages")          — page structure knowledge
-  ("app", "{app_url_hash}", "selectors")      — selector reliability tracking
-  ("app", "{app_url_hash}", "quirks")         — application-specific behaviors
-  ("episodes", "{app_url_hash}", "sessions")  — completed session summaries
-  ("episodes", "{app_url_hash}", "bugs")      — deduplicated bug catalog
-  ("procedures", "{app_url_hash}", "agent_prompts")  — per-agent prompt supplements
-  ("procedures", "{app_url_hash}", "routing_rules")  — supervisor routing refinements
+  ("app", "{app_url_hash}", "pages")               — page structure knowledge
+  ("app", "{app_url_hash}", "selectors")            — selector reliability tracking
+  ("app", "{app_url_hash}", "quirks")               — application-specific behaviors
+  ("app", "{app_url_hash}", "agent_observations")   — Langmem-managed agent observations
+  ("episodes", "{app_url_hash}", "sessions")        — completed session summaries
+  ("episodes", "{app_url_hash}", "bugs")            — deduplicated bug catalog
+  ("procedures", "{app_url_hash}", "agent_prompts") — per-agent prompt supplements
+  ("procedures", "{app_url_hash}", "routing_rules") — supervisor routing refinements
 """
 
 from __future__ import annotations
@@ -165,8 +167,22 @@ async def write_semantic_memories_from_tape(
 # Semantic memory: read for supervisor context
 # ---------------------------------------------------------
 
-async def format_memory_context(store, url_hash: str) -> str:
-    """Build a MEMORY_CONTEXT section for the supervisor routing prompt."""
+async def _semantic_search(store, namespace, limit: int, query: str = ""):
+    """Search store with optional semantic query; fall back to plain scan."""
+    if query:
+        try:
+            return await store.asearch(namespace, query=query, limit=limit)
+        except (TypeError, Exception):
+            pass
+    return await store.asearch(namespace, limit=limit)
+
+
+async def format_memory_context(store, url_hash: str, mission_context: str = "") -> str:
+    """Build a MEMORY_CONTEXT section for the supervisor routing prompt.
+
+    When *mission_context* is provided and the store has an embedding index,
+    results are ranked by semantic relevance to the current mission.
+    """
     sections: List[str] = []
 
     pages = await store.asearch(("app", url_hash, "pages"), limit=15)
@@ -177,15 +193,20 @@ async def format_memory_context(store, url_hash: str) -> str:
             page_lines.append(f"- {v.get('url', '?')} (visited {v.get('visit_count', 0)}x)")
         sections.append("KNOWN_PAGES:\n" + "\n".join(page_lines[:10]))
 
-    quirks = await store.asearch(("app", url_hash, "quirks"), limit=8)
+    quirks = await _semantic_search(store, ("app", url_hash, "quirks"), 8, mission_context)
     if quirks:
         quirk_lines = [f"- {q.value.get('description', '?')[:200]}" for q in quirks]
         sections.append("KNOWN_QUIRKS:\n" + "\n".join(quirk_lines))
 
-    bugs = await store.asearch(("episodes", url_hash, "bugs"), limit=6)
+    bugs = await _semantic_search(store, ("episodes", url_hash, "bugs"), 6, mission_context)
     if bugs:
         bug_lines = [f"- {b.value.get('summary', '?')[:200]} (seen {b.value.get('seen_count', 1)}x)" for b in bugs]
         sections.append("KNOWN_BUGS_FROM_PAST_SESSIONS:\n" + "\n".join(bug_lines))
+
+    observations = await _semantic_search(store, ("app", url_hash, "agent_observations"), 5, mission_context)
+    if observations:
+        obs_lines = [f"- {o.value.get('content', str(o.value))[:200]}" for o in observations]
+        sections.append("AGENT_OBSERVATIONS:\n" + "\n".join(obs_lines))
 
     priority_text = await prioritize_pages(store, url_hash)
     if priority_text:
@@ -306,64 +327,86 @@ async def write_episode_memory(
 # ---------------------------------------------------------
 
 def get_recall_tool(store, url_hash: str):
-    """Return a LangChain tool that agents can call to recall past findings for a page area."""
+    """Return a LangChain tool that agents can call to recall past findings.
+
+    Uses semantic search when the store has an embedding index configured,
+    otherwise falls back to keyword matching.
+    """
     from langchain_core.tools import tool
 
+    async def _search(namespace, query: str, limit: int):
+        """Attempt semantic search; fall back to keyword scan."""
+        try:
+            return await store.asearch(namespace, query=query, limit=limit)
+        except (TypeError, Exception):
+            items = await store.asearch(namespace, limit=limit * 3)
+            q = query.strip().lower()
+            return [
+                it for it in items
+                if any(q in str(v).lower() for v in it.value.values() if isinstance(v, str))
+            ][:limit]
+
     @tool
-    async def recall_past_findings(page_url_pattern: str) -> str:
-        """Recall bugs and testing outcomes from past sessions for a page area.
+    async def recall_past_findings(query: str) -> str:
+        """Recall bugs, quirks, and session history related to a query.
 
         Args:
-            page_url_pattern: URL path or keyword to match (e.g. "/systems", "login", "/home").
+            query: What to search for — a page path, feature name, or description
+                   (e.g. "login page", "form validation", "/systems").
         """
-        pattern = page_url_pattern.strip().lower()
         results: List[str] = []
 
-        bugs = await store.asearch(("episodes", url_hash, "bugs"), limit=20)
-        matched_bugs = [
-            b for b in bugs
-            if pattern in (b.value.get("page", "").lower())
-            or pattern in (b.value.get("summary", "").lower())
-        ]
-        if matched_bugs:
-            results.append(f"KNOWN BUGS ({len(matched_bugs)}):")
-            for b in matched_bugs[:8]:
+        bugs = await _search(("episodes", url_hash, "bugs"), query, 8)
+        if bugs:
+            results.append(f"KNOWN BUGS ({len(bugs)}):")
+            for b in bugs:
                 v = b.value
                 results.append(f"  - {v.get('summary', '?')[:200]} (seen {v.get('seen_count', 1)}x, status: {v.get('status', 'open')})")
 
-        sessions = await store.asearch(("episodes", url_hash, "sessions"), limit=20)
-        matched_sessions = [
-            s for s in sessions
-            if any(pattern in p.lower() for p in s.value.get("pages_covered", []))
-            or pattern in s.value.get("mission_prompt_summary", "").lower()
-        ]
-        if matched_sessions:
-            results.append(f"\nPAST SESSIONS covering this area ({len(matched_sessions)}):")
-            for s in matched_sessions[:5]:
+        sessions = await _search(("episodes", url_hash, "sessions"), query, 5)
+        if sessions:
+            results.append(f"\nPAST SESSIONS ({len(sessions)}):")
+            for s in sessions:
                 v = s.value
                 results.append(
                     f"  - {v.get('thread_id', '?')}: {v.get('total_actions', 0)} actions, "
                     f"{v.get('bugs_found', 0)} bugs, outcome={v.get('outcome', '?')}"
                 )
 
-        quirks = await store.asearch(("app", url_hash, "quirks"), limit=15)
-        matched_quirks = [
-            q for q in quirks
-            if pattern in q.value.get("page", "").lower()
-            or pattern in q.value.get("description", "").lower()
-        ]
-        if matched_quirks:
-            results.append(f"\nKNOWN QUIRKS ({len(matched_quirks)}):")
-            for q in matched_quirks[:5]:
+        quirks = await _search(("app", url_hash, "quirks"), query, 5)
+        if quirks:
+            results.append(f"\nKNOWN QUIRKS ({len(quirks)}):")
+            for q in quirks:
                 v = q.value
                 results.append(f"  - {v.get('description', '?')[:200]} (confirmed {v.get('confirmed_count', 1)}x)")
 
         if not results:
-            return f"No past findings found for '{page_url_pattern}'. This area may not have been tested before."
+            return f"No past findings for '{query}'. This area may not have been tested before."
 
         return "\n".join(results)
 
     return recall_past_findings
+
+
+# ---------------------------------------------------------
+# Agent proactive memory tool (Langmem)
+# ---------------------------------------------------------
+
+def get_memory_management_tool(store, url_hash: str):
+    """Return a Langmem tool allowing agents to proactively record observations."""
+    from langmem import create_manage_memory_tool
+
+    return create_manage_memory_tool(
+        namespace=("app", url_hash, "agent_observations"),
+        instructions=(
+            "Record important observations about the application under test that "
+            "may be useful in future testing sessions. Use this tool when you notice: "
+            "unexpected UI behaviors, performance issues, confusing UX patterns, "
+            "accessibility problems, or successful testing strategies worth repeating."
+        ),
+        store=store,
+        name="record_observation",
+    )
 
 
 # ---------------------------------------------------------
@@ -378,6 +421,10 @@ async def get_agent_prompt_supplement(store, url_hash: str, agent_name: str) -> 
         return ""
 
     data = existing.value
+
+    if "optimized_prompt" in data:
+        return f"LEARNED FROM PAST SESSIONS:\n{data['optimized_prompt']}"
+
     sections: List[str] = []
 
     learned = data.get("learned_additions", [])
@@ -404,7 +451,12 @@ async def get_routing_rules_supplement(store, url_hash: str) -> str:
     if not existing:
         return ""
 
-    rules = existing.value.get("rules", [])
+    data = existing.value
+
+    if "optimized_prompt" in data:
+        return f"LEARNED ROUTING RULES:\n{data['optimized_prompt']}"
+
+    rules = data.get("rules", [])
     if not rules:
         return ""
     return "LEARNED ROUTING RULES:\n" + "\n".join(f"- {r}" for r in rules[-8:])
@@ -414,129 +466,117 @@ async def get_routing_rules_supplement(store, url_hash: str) -> str:
 # Procedural memory: write via LLM reflection (post-batch)
 # ---------------------------------------------------------
 
-_REFLECTION_PROMPT = """\
-You are a QA process improvement analyst. Based on the testing session summaries below, \
-extract actionable lessons to improve future test sessions.
+def _format_agent_knowledge(data: Dict[str, Any]) -> str:
+    """Serialize stored agent knowledge into a prompt string for the optimizer."""
+    if "optimized_prompt" in data:
+        return data["optimized_prompt"]
+    parts: List[str] = []
+    for key, label in [
+        ("learned_additions", "Key observations"),
+        ("effective_strategies", "Effective strategies"),
+        ("avoid_strategies", "Avoid"),
+    ]:
+        items = data.get(key, [])
+        if items:
+            parts.append(f"{label}:\n" + "\n".join(f"- {i}" for i in items))
+    return "\n".join(parts) if parts else ""
 
-SESSION SUMMARIES:
-{sessions}
 
-CURRENT AGENT KNOWLEDGE:
-{current_knowledge}
-
-For EACH agent that appeared in these sessions, provide:
-1. learned_additions: Key facts about the application discovered during testing (max 5)
-2. effective_strategies: Testing approaches that found bugs or achieved good coverage (max 3)
-3. avoid_strategies: Approaches that wasted time or hit dead ends (max 3)
-
-Also provide up to 5 routing_rules for the supervisor (e.g., which agent to prefer for which area).
-
-Respond in this exact JSON format:
-{{
-  "agents": {{
-    "agent_name": {{
-      "learned_additions": ["..."],
-      "effective_strategies": ["..."],
-      "avoid_strategies": ["..."]
-    }}
-  }},
-  "routing_rules": ["..."]
-}}
-"""
+def _format_routing_rules(data: Dict[str, Any]) -> str:
+    """Serialize stored routing rules into a prompt string for the optimizer."""
+    if "optimized_prompt" in data:
+        return data["optimized_prompt"]
+    rules = data.get("rules", [])
+    if rules:
+        return "\n".join(f"- {r}" for r in rules)
+    return ""
 
 
 async def update_procedural_memory(store, url_hash: str, llm) -> None:
     """Reflect on recent sessions and update agent prompt supplements and routing rules.
 
-    Uses LLM reflection on episodic memory to generate procedural improvements.
+    Uses Langmem's prompt optimizer for structured reflection on episodic memory.
     Called once after all missions in a batch complete.
     """
-    import json
+    from langmem import create_prompt_optimizer
 
     sessions = await store.asearch(("episodes", url_hash, "sessions"), limit=15)
     if not sessions:
         return
 
-    session_text = "\n".join(
-        f"- {s.value.get('thread_id', '?')}: {s.value.get('total_actions', 0)} actions, "
-        f"{s.value.get('bugs_found', 0)} bugs, outcome={s.value.get('outcome', '?')}, "
-        f"pages={s.value.get('pages_covered', [])[:5]}"
-        for s in sessions
-    )
+    trajectory_messages: List[Dict[str, str]] = []
+    for s in sessions:
+        v = s.value
+        trajectory_messages.append({
+            "role": "user",
+            "content": f"Mission: {v.get('mission_prompt_summary', '?')}",
+        })
+        trajectory_messages.append({
+            "role": "assistant",
+            "content": (
+                f"Completed with {v.get('total_actions', 0)} actions, "
+                f"{v.get('bugs_found', 0)} bugs found. "
+                f"Outcome: {v.get('outcome', '?')}. "
+                f"Pages covered: {v.get('pages_covered', [])[:5]}"
+            ),
+        })
 
-    agent_names = set()
+    optimizer = create_prompt_optimizer(llm, kind="prompt_memory")
+
+    prompts_ns = ("procedures", url_hash, "agent_prompts")
+    agent_names: set = set()
     for s in sessions:
         tid = s.value.get("thread_id", "")
-        for part in tid.split("_"):
-            if part in ("agent",):
-                continue
         agent_names.add(tid)
 
-    current_parts: List[str] = []
-    prompts_ns = ("procedures", url_hash, "agent_prompts")
-    for s in sessions:
-        tid = s.value.get("thread_id", "")
-        existing = await store.aget(prompts_ns, tid)
-        if existing:
-            current_parts.append(f"{tid}: {json.dumps(existing.value, default=str)[:300]}")
+    for agent_name in agent_names:
+        existing = await store.aget(prompts_ns, agent_name)
+        current_text = _format_agent_knowledge(existing.value) if existing else ""
+        base_prompt = (
+            f"You are {agent_name}, a QA testing agent. "
+            "Your goal is to test web applications effectively.\n"
+        )
+        if current_text:
+            base_prompt += f"\n{current_text}"
 
-    rules_existing = await store.aget(("procedures", url_hash, "routing_rules"), "current")
-    if rules_existing:
-        current_parts.append(f"routing_rules: {json.dumps(rules_existing.value, default=str)[:300]}")
+        try:
+            optimized = await optimizer.ainvoke({
+                "trajectories": [(trajectory_messages, {"context": "batch review"})],
+                "prompt": base_prompt,
+            })
+            optimized_text = optimized if isinstance(optimized, str) else str(optimized)
+            version = (existing.value.get("version", 0) + 1) if existing else 1
+            await store.aput(prompts_ns, agent_name, {
+                "agent_name": agent_name,
+                "optimized_prompt": optimized_text,
+                "version": version,
+            })
+        except Exception:
+            pass
 
-    current_knowledge = "\n".join(current_parts) if current_parts else "No prior procedural knowledge."
-
-    from langchain_core.messages import HumanMessage as HMsg
-    prompt = _REFLECTION_PROMPT.format(sessions=session_text, current_knowledge=current_knowledge)
-    response = await llm.ainvoke([HMsg(content=prompt)])
-
-    response_text = response.content
-    if isinstance(response_text, list):
-        response_text = "".join(b.get("text", "") for b in response_text if isinstance(b, dict))
-
-    json_match = re.search(r"\{[\s\S]*\}", response_text)
-    if not json_match:
-        return
+    rules_ns = ("procedures", url_hash, "routing_rules")
+    existing_rules = await store.aget(rules_ns, "current")
+    current_rules_text = _format_routing_rules(existing_rules.value) if existing_rules else ""
+    base_rules = (
+        "You are the QA Orchestrator routing supervisor. "
+        "Decide which agent to route to based on mission progress and page areas.\n"
+    )
+    if current_rules_text:
+        base_rules += f"\n{current_rules_text}"
 
     try:
-        result = json.loads(json_match.group())
-    except json.JSONDecodeError:
-        return
-
-    agents_data = result.get("agents", {})
-    for agent_name, updates in agents_data.items():
-        if not isinstance(updates, dict):
-            continue
-        existing = await store.aget(prompts_ns, agent_name)
-        if existing:
-            data = existing.value
-            for key in ("learned_additions", "effective_strategies", "avoid_strategies"):
-                new_items = updates.get(key, [])
-                if isinstance(new_items, list):
-                    old_items = data.get(key, [])
-                    merged = list(dict.fromkeys(old_items + new_items))[-10:]
-                    data[key] = merged
-        else:
-            data = {
-                "agent_name": agent_name,
-                "learned_additions": (updates.get("learned_additions") or [])[:10],
-                "effective_strategies": (updates.get("effective_strategies") or [])[:5],
-                "avoid_strategies": (updates.get("avoid_strategies") or [])[:5],
-            }
-        await store.aput(prompts_ns, agent_name, data)
-
-    new_rules = result.get("routing_rules", [])
-    if isinstance(new_rules, list) and new_rules:
-        rules_ns = ("procedures", url_hash, "routing_rules")
-        existing_rules = await store.aget(rules_ns, "current")
-        if existing_rules:
-            old_rules = existing_rules.value.get("rules", [])
-            version = existing_rules.value.get("version", 0) + 1
-            merged_rules = list(dict.fromkeys(old_rules + new_rules))[-10:]
-        else:
-            version = 1
-            merged_rules = new_rules[:10]
-        await store.aput(rules_ns, "current", {"version": version, "rules": merged_rules})
+        optimized_rules = await optimizer.ainvoke({
+            "trajectories": [(trajectory_messages, {"context": "routing review"})],
+            "prompt": base_rules,
+        })
+        optimized_text = optimized_rules if isinstance(optimized_rules, str) else str(optimized_rules)
+        version = (existing_rules.value.get("version", 0) + 1) if existing_rules else 1
+        await store.aput(rules_ns, "current", {
+            "optimized_prompt": optimized_text,
+            "version": version,
+        })
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------

@@ -17,7 +17,7 @@ from agentic_explorer.tools.browser.engine import (
     get_dom_snapshot_tool,
     get_code_generator_tool,
 )
-from agentic_explorer.memory import app_url_hash, get_recall_tool, get_agent_prompt_supplement, get_routing_rules_supplement
+from agentic_explorer.memory import app_url_hash, get_recall_tool, get_memory_management_tool, get_agent_prompt_supplement, get_routing_rules_supplement
 from agentic_explorer.orchestration.graph_base import (
     AgentState,
     filter_base_tools,
@@ -70,6 +70,7 @@ async def build_advanced_graph(base_tools: list, active_page: Page, checkpointer
     ]
     if store:
         advanced_tools.append(get_recall_tool(store, url_hash))
+        advanced_tools.append(get_memory_management_tool(store, url_hash))
 
     domain_line = f"Domain context: {app_description}\n\n" if app_description else ""
 

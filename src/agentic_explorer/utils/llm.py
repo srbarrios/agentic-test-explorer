@@ -66,14 +66,13 @@ def _default_gemini_model() -> str:
     if model := os.getenv("GEMINI_MODEL"):
         return model
     # OAuth (Gemini Advanced subscription) → use best model; API key → economical
-    return "gemini-2.5-flash" if os.getenv("GOOGLE_API_KEY") else "gemini-2.5-pro"
+    return "gemini-2.5-flash" if os.getenv("GOOGLE_API_KEY") else "gemini-3.1-flash"
 
 
 def _default_claude_model() -> str:
     if model := os.getenv("CLAUDE_MODEL"):
         return model
-    # Vertex AI (GCP billing) → Sonnet; direct API key → economical Haiku
-    return "claude-sonnet-4-6" if _claude_vertex_config() else "claude-haiku-4-5"
+    return "claude-haiku-4-5"
 
 
 def _make_gemini_llm(temperature: float, model_name: Optional[str]) -> Any:
@@ -104,7 +103,7 @@ def _make_claude_llm(temperature: float, model_name: Optional[str]) -> Any:
             project=vertex_cfg["project_id"],
             location=vertex_cfg["location"],
             temperature=temperature,
-            max_retries=0,
+            max_retries=3,
         )
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:

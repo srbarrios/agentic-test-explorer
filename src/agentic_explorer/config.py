@@ -82,6 +82,8 @@ class LLMConfig:
     claude_model: Optional[str] = None
     gemini_vision_model: Optional[str] = None
     claude_vision_model: Optional[str] = None
+    embedding_model: Optional[str] = None   # e.g. "openai:text-embedding-3-small"
+    embedding_dims: Optional[int] = None    # e.g. 1536
 
 
 @dataclass
@@ -139,5 +141,7 @@ def load_app_config(path: Optional[str | Path] = None) -> AppConfig:
             claude_model=llm_raw.get("claude_model") or None,
             gemini_vision_model=llm_raw.get("gemini_vision_model") or None,
             claude_vision_model=llm_raw.get("claude_vision_model") or None,
+            embedding_model=llm_raw.get("embedding_model") or None,
+            embedding_dims=int(llm_raw["embedding_dims"]) if llm_raw.get("embedding_dims") else None,
         ),
     )

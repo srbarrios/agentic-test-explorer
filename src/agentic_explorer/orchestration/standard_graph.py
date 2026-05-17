@@ -10,7 +10,7 @@ from agentic_explorer.tools.browser.engine import (
     get_dom_snapshot_tool,
     get_code_generator_tool,
 )
-from agentic_explorer.memory import app_url_hash, get_recall_tool, get_agent_prompt_supplement, get_routing_rules_supplement
+from agentic_explorer.memory import app_url_hash, get_recall_tool, get_memory_management_tool, get_agent_prompt_supplement, get_routing_rules_supplement
 from agentic_explorer.orchestration.graph_base import (
     AgentState,
     filter_base_tools,
@@ -65,6 +65,7 @@ async def build_graph(base_tools: list, active_page: Page, checkpointer, app: Ap
     ]
     if store:
         dom_tools.append(get_recall_tool(store, url_hash))
+        dom_tools.append(get_memory_management_tool(store, url_hash))
 
     agent_focuses = {
         "new_user_agent": (

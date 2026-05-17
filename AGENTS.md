@@ -71,8 +71,10 @@ The generated missions follow the standard YAML format and are routed to agents 
 
 ### State Management
 * **Persistent Memory**: State is persisted via an SQLite checkpointer (`agent_memory.sqlite`),
-  keyed by the `thread_id`. A companion `AsyncSqliteStore` (sharing the same SQLite file)
-  provides cross-session memory.
+  keyed by the `thread_id`. A companion `AsyncSqliteStore` (sharing the same SQLite file,
+  optionally configured with an embedding index for semantic search) provides cross-session
+  memory. LLM-driven memory operations (procedural reflection, agent observations) are
+  powered by the **Langmem SDK**.
 * **Mission Isolation**: Each mission has a unique `thread_id` to isolate its checkpoints;
   reusing a thread ID resumes the prior context. Use `--clear-checkpoints` to reset
   checkpoints while preserving learned memory, `--clear-learned` for the inverse, or
@@ -85,20 +87,23 @@ The generated missions follow the standard YAML format and are routed to agents 
   (mission prompt) and the 20 most recent messages; messages in between are replaced with
   a deterministic compact summary.
 * **Cross-Session Memory** (`src/agentic_explorer/memory.py`): Four levels of memory backed
-  by the LangGraph Store:
-  - **Semantic** — page knowledge, selector reliability tracking, application quirks.
-    Written automatically on every agent turn from action tape entries.
+  by the LangGraph Store, with LLM-driven operations powered by **Langmem**:
+  - **Semantic** — page knowledge, selector reliability tracking, application quirks
+    (written automatically on every agent turn from action tape entries), plus
+    Langmem-managed agent observations (recorded proactively via `record_observation` tool).
   - **Episodic** — session summaries, deduplicated bug catalog. Written after each mission
-    completes. Agents query past findings via the `recall_past_findings` tool.
-  - **Procedural** — per-agent prompt supplements and supervisor routing rules. Generated
-    via LLM reflection after each batch; read at graph construction time to evolve agent
-    prompts and routing strategy.
+    completes. Agents query past findings via the `recall_past_findings` tool, which uses
+    semantic vector search when an embedding index is configured (falls back to keyword
+    matching otherwise).
+  - **Procedural** — per-agent prompt supplements and supervisor routing rules. Optimized
+    via Langmem's `create_prompt_optimizer` after each batch; read at graph construction
+    time to evolve agent prompts and routing strategy.
   - **Prioritization** — risk-scored page ranking (bug density, selector flakiness, quirk
     count). Injected into supervisor routing context automatically.
 
   Namespace layout:
   ```
-  ("app", "{url_hash}", "pages"|"selectors"|"quirks")
+  ("app", "{url_hash}", "pages"|"selectors"|"quirks"|"agent_observations")
   ("episodes", "{url_hash}", "sessions"|"bugs")
   ("procedures", "{url_hash}", "agent_prompts"|"routing_rules")
   ```
@@ -119,8 +124,10 @@ The framework is configured through three user-supplied files (templates ship as
   `GEMINI_REPORT_MODEL`, `GEMINI_SCENARIO_MODEL`, `SCENARIO_MODEL` (provider-agnostic).
 * **`config.yaml`** (loaded by `src/agentic_explorer/config.py`) — `app.{name,url,description}`,
   `auth.{method,selectors,post_login_check}`, `paths.{mcp_servers,skills_root}`,
-  `llm.{provider,claude_model,gemini_model,claude_vision_model,gemini_vision_model}`.
-  Supports `${ENV_VAR}` interpolation.
+  `llm.{provider,claude_model,gemini_model,claude_vision_model,gemini_vision_model,
+  embedding_model,embedding_dims}`. Supports `${ENV_VAR}` interpolation. Embedding config
+  enables semantic search in long-term memory (e.g. `embedding_model: google-genai:models/embedding-001`,
+  `embedding_dims: 768`). Also overridable via `EMBEDDING_MODEL` and `EMBEDDING_DIMS` env vars.
 * **`mcp_servers.json`** — Claude-Desktop-compatible MCP server map. Optional; agents run
   without MCP tools if missing or empty. A `"github"` entry enables MCP-based PR data
   fetching (preferred over `gh` CLI):
@@ -152,8 +159,14 @@ The framework is configured through three user-supplied files (templates ship as
   is thread-aware via `RunnableConfig`. The browser engine translates Action Tape entries
   into reproducible Playwright specs.
 * **Memory Recall** (`recall_past_findings` in `src/agentic_explorer/memory.py`): Agents
-  can call this tool to query the bug catalog, session history, and quirks for a page area.
-  Added to agent tool bundles automatically when a store is available.
+  can call this tool to query the bug catalog, session history, and quirks. Uses semantic
+  vector search when the store has an embedding index configured; falls back to keyword
+  matching otherwise. Added to agent tool bundles automatically when a store is available.
+* **Observation Recording** (`record_observation`, powered by Langmem's
+  `create_manage_memory_tool`): Agents can proactively record high-level observations
+  about the application (unexpected behaviors, UX issues, successful strategies). These
+  observations are stored in the `agent_observations` namespace and surfaced in the
+  supervisor's `MEMORY_CONTEXT` in subsequent runs.
 
 ## Running the System
 
@@ -161,8 +174,8 @@ The framework is configured through three user-supplied files (templates ship as
 1. **Install dependencies**: `pip install -e .` (or `uv pip install -e .`).
    Re-run this after every `git pull` to pick up new or updated packages. Key packages:
    `langchain`, `langchain-anthropic`, `langchain-google-genai`, `langchain-google-vertexai`,
-   `langgraph`, `playwright`, `python-dotenv`, `pyyaml`, `pillow`, `langchain-mcp-adapters`,
-   `langgraph-checkpoint-sqlite`, `aiosqlite`, `httpx`.
+   `langgraph`, `langmem`, `playwright`, `python-dotenv`, `pyyaml`, `pillow`,
+   `langchain-mcp-adapters`, `langgraph-checkpoint-sqlite`, `aiosqlite`, `httpx`.
 2. **Install browser**: Run `playwright install chromium`.
 3. **Configure**: Copy `.env.example` → `.env`, `config.yaml.example` → `config.yaml`, and
    (optionally) `mcp_servers.json.example` → `mcp_servers.json`. Fill in your app's URL,
@@ -231,8 +244,10 @@ Every mission generates artifacts localized in a `report_<thread_id>/` directory
   `await` them.
 * **Memory Module**: All cross-session memory logic lives in `src/agentic_explorer/memory.py`.
   Do not scatter store reads/writes across other files — add new memory functions there and
-  import them. Store namespace conventions: `("app", hash, ...)` for semantic,
-  `("episodes", hash, ...)` for episodic, `("procedures", hash, ...)` for procedural.
+  import them. LLM-driven operations (procedural reflection, agent observations) use the
+  **Langmem SDK** (`langmem` package). Store namespace conventions:
+  `("app", hash, ...)` for semantic, `("episodes", hash, ...)` for episodic,
+  `("procedures", hash, ...)` for procedural.
 * **Agent Modification**: If adding a new agent, you must update the system prompt, tool
   bundle, agent registry, supervisor descriptions, and routing keywords when applicable.
   The agent will automatically receive procedural memory supplements if the store has
