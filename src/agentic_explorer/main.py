@@ -1,6 +1,7 @@
 import asyncio
 import os
 import argparse
+import random
 import warnings
 import yaml
 from typing import Any
@@ -336,6 +337,8 @@ async def run_missions():
         console.warn("No missions found. Exiting.")
         return
 
+    mission_cooldown = int(os.getenv("MISSION_COOLDOWN", "5"))
+
     console.section("Setup")
     console.step("Loading MCP server tools...")
     doc_tools = await get_mcp_tools(cfg.paths.mcp_servers)
@@ -351,10 +354,18 @@ async def run_missions():
     console.step("Initializing browser, database, and memory store...")
     async_sqlite_saver = _get_async_sqlite_saver()
     from langgraph.store.sqlite import AsyncSqliteStore
+
+    _emb_model = os.getenv("EMBEDDING_MODEL") or cfg.llm.embedding_model
+    _emb_dims = int(os.getenv("EMBEDDING_DIMS", "0")) or cfg.llm.embedding_dims or 0
+    _store_kwargs: dict = {}
+    if _emb_model and _emb_dims:
+        _store_kwargs["index"] = {"dims": _emb_dims, "embed": _emb_model}
+        console.info(f"Embedding index: {_emb_model} ({_emb_dims}d)")
+
     async with (
         async_playwright() as playwright_instance,
         async_sqlite_saver.from_conn_string("agent_memory.sqlite") as memory_saver,
-        AsyncSqliteStore.from_conn_string("agent_memory.sqlite") as memory_store,
+        AsyncSqliteStore.from_conn_string("agent_memory.sqlite", **_store_kwargs) as memory_store,
     ):
         browser = await playwright_instance.chromium.launch(headless=not args.headed, args=["--start-maximized"])
 
@@ -483,7 +494,7 @@ async def run_missions():
                     if _is_transient_error(e):
                         if attempt < max_retries - 1:
                             if _is_rate_limit(e):
-                                delay = max(30, base_delay * (4 ** attempt))
+                                delay = 30 + (attempt * 15) + random.randint(0, 10)
                                 console.warn(f"Rate limit hit: {str(e)[:120]}")
                             else:
                                 delay = base_delay * (2 ** attempt)
@@ -548,7 +559,7 @@ async def run_missions():
                     if _is_transient_error(e):
                         if attempt < max_retries - 1:
                             if _is_rate_limit(e):
-                                delay = max(30, base_delay * (4 ** attempt))
+                                delay = 30 + (attempt * 15) + random.randint(0, 10)
                                 console.warn(f"Rate limit hit: {str(e)[:120]}")
                             else:
                                 delay = base_delay * (2 ** attempt)
@@ -592,6 +603,10 @@ async def run_missions():
                     f"- **Tape log:** `action_tape.jsonl`\n"
                     f"- **Reproductions:** any `reproduction_*.spec.ts` in this folder can be run with `npx playwright test`.\n"
                 )
+
+            if mission_cooldown > 0 and mission != missions[-1]:
+                console.info(f"Cooling down {mission_cooldown}s before next mission...")
+                await asyncio.sleep(mission_cooldown)
 
         # Post-batch: update procedural memory via LLM reflection
         try:

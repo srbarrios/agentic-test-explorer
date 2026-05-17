@@ -80,7 +80,12 @@ before testing it.
 ## Cross-session memory
 
 Agents learn across sessions. After each mission, the framework records session summaries
-and bug fingerprints. After each batch, an LLM reflection step generates prompt supplements
-and routing rule refinements. On subsequent runs, agents receive learned context (effective
+and bug fingerprints. After each batch, **Langmem's prompt optimizer** reflects on session
+outcomes and generates improved prompts for each agent and routing rules for the supervisor.
+On subsequent runs, agents receive optimized prompts with learned context (effective
 strategies, things to avoid, known page structures) and the supervisor routes based on
 risk-scored page prioritization.
+
+Agents can also proactively record observations using the `record_observation` tool
+(powered by Langmem) and recall past findings via semantic search when an embedding
+model is configured (see `config.yaml > llm.embedding_model`).

@@ -101,15 +101,21 @@ graph TD
 5. **State & Memory (`agent_memory.sqlite`)**: An asynchronous SQLite checkpointer
    remembers agent states (including the `action_tape` field), allowing a reused
    `thread_id` to resume precisely where it left off. A companion **LangGraph Store**
-   provides four levels of cross-session memory:
-   - **Semantic** — page knowledge, selector reliability, application quirks
+   (optionally configured with an embedding index for semantic search) provides four
+   levels of cross-session memory, with LLM-driven operations powered by **Langmem**:
+   - **Semantic** — page knowledge, selector reliability, application quirks, plus
+     Langmem-managed agent observations (via `record_observation` tool)
    - **Episodic** — session summaries, deduplicated bug catalog
-   - **Procedural** — self-improving agent prompts and routing rules (LLM-reflected)
+   - **Procedural** — self-improving agent prompts and routing rules optimized via
+     Langmem's `create_prompt_optimizer`
    - **Prioritization** — risk-scored page ranking injected into supervisor routing
 
-   Agents can query past findings at runtime via the `recall_past_findings` tool.
+   Agents can query past findings at runtime via the `recall_past_findings` tool,
+   which uses semantic search when an embedding index is configured and falls back to
+   keyword matching otherwise. Agents can also proactively record observations via the
+   `record_observation` tool (powered by Langmem's `create_manage_memory_tool`).
    The supervisor receives a `MEMORY_CONTEXT` section with known pages, bugs, quirks,
-   and high-risk areas on every routing cycle.
+   agent observations, and high-risk areas on every routing cycle.
 
 ### Source Layout
 
@@ -126,8 +132,10 @@ graph TD
 - `src/agentic_explorer/orchestration/standard_graph.py` — 3 standard QA personas
 - `src/agentic_explorer/orchestration/advanced_graph.py` — 4 advanced personas plus autonomous explorer
 - `src/agentic_explorer/memory.py` — cross-session memory: semantic (pages, selectors,
-  quirks), episodic (session summaries, bug catalog), procedural (self-improving prompts),
-  recall tool, regression mission generation, app model export, test prioritization
+  quirks, Langmem-managed agent observations), episodic (session summaries, bug catalog),
+  procedural (self-improving prompts via Langmem prompt optimizer), semantic-search recall
+  tool, proactive observation tool, regression mission generation, app model export, test
+  prioritization
 - `src/agentic_explorer/tools/browser/engine.py` — Record-and-Translate browser engine
 - `src/agentic_explorer/tools/common/custom_tools.py` — screenshot, MCP loader,
   Skills tools
@@ -155,10 +163,11 @@ graph TD
   [agentskills.io](https://agentskills.io/specification) spec) under `AGENT_SKILLS_ROOT`
   and the framework exposes them automatically.
 * **Cross-Session Learning**: A four-level memory system (semantic, episodic, procedural,
-  prioritization) lets agents learn across sessions. The framework remembers page
-  structures, selector reliability, application quirks, past bugs, and which testing
-  strategies worked. Agent prompts and supervisor routing rules self-improve via
-  post-batch LLM reflection.
+  prioritization) powered by **Langmem** lets agents learn across sessions. The framework
+  remembers page structures, selector reliability, application quirks, agent observations,
+  past bugs, and which testing strategies worked. Agent prompts and supervisor routing
+  rules self-improve via Langmem's prompt optimizer after each batch. Agents can
+  proactively record observations and recall past findings using semantic search.
 * **Regression Testing**: Run `--regression` to auto-generate missions from the bug
   catalog — no YAML needed. The framework targets pages with known open bugs and
   historically flaky areas.
@@ -265,9 +274,9 @@ AGENT_SKILL_SCRIPT_TIMEOUT="60"
 | Auth Method | Default Model | Rationale |
 |-------------|---------------|-----------|
 | Claude API key | `claude-haiku-4-5` | Fast, economical |
-| Claude Vertex AI | `claude-sonnet-4-6` | GCP billing, higher capability |
+| Claude Vertex AI | `claude-haiku-4-5` | Fast, economical |
 | Gemini API key | `gemini-2.5-flash` | Fast, economical |
-| Gemini OAuth | `gemini-2.5-pro` | Subscription, use best |
+| Gemini OAuth | `gemini-3.1-flash` | Subscription, fast |
 
 Override models via env vars (`CLAUDE_MODEL`, `GEMINI_MODEL`) or in `config.yaml` (see below).
 
@@ -300,6 +309,15 @@ llm:
   # claude_vision_model: claude-haiku-4-5
   # gemini_model: gemini-2.5-flash
   # gemini_vision_model: gemini-2.5-flash
+
+  # Embedding model for semantic search in long-term memory (optional).
+  # When configured, recall_past_findings uses vector similarity instead of
+  # keyword matching.  Gemini users can use their existing API key; Claude
+  # users can run a local model via Ollama.
+  # embedding_model: google-genai:models/embedding-001   # Gemini (768d)
+  # embedding_dims: 768
+  # embedding_model: ollama:nomic-embed-text             # Ollama local (768d)
+  # embedding_dims: 768
 ```
 
 ### 4. (Optional) MCP Servers
