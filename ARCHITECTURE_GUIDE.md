@@ -1,13 +1,5 @@
 # Complete Architecture Guide: Agentic Test Explorer
 
-> **Author:** Generated as educational material on Software Architecture
->
-> **Audience:** Software engineers with no prior experience in LangChain/LangGraph
->
-> **Project:** [Agentic Test Explorer](https://github.com/srbarrios/agentic-test-explorer) -- an autonomous exploratory QA framework based on AI agents
-
----
-
 ## Table of Contents
 
 1. [Project Overview](#1-project-overview)
