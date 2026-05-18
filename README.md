@@ -139,6 +139,9 @@ graph TD
 - `src/agentic_explorer/tools/browser/engine.py` — Record-and-Translate browser engine
 - `src/agentic_explorer/tools/common/custom_tools.py` — screenshot, MCP loader,
   Skills tools
+- `src/agentic_explorer/ui/state_emitter.py` — non-blocking state bridge for Visual Mode
+- `src/agentic_explorer/ui/swarm_diagram.py` — Mermaid diagram generator
+- `src/agentic_explorer/ui/dashboard.py` — Streamlit dashboard app
 
 ---
 
@@ -203,6 +206,11 @@ pip install -e .
 # Or, if you use uv (recommended — much faster):
 uv venv
 uv pip install -e .
+
+# Optional: Install Visual Mode (Streamlit dashboard)
+pip install -e ".[visual]"
+# Or with uv:
+uv pip install -e ".[visual]"
 
 # Install the Playwright Chromium browser
 playwright install chromium
@@ -363,6 +371,79 @@ agent-auth
 
 The auth flow uses the selectors defined in `config.yaml > auth`. Adjust them to match
 your app's login form.
+
+---
+
+## 📊 Visual Mode (Real-Time Dashboard)
+
+The framework includes an optional **Visual Mode** — a Streamlit-based real-time dashboard that displays live browser screenshots, swarm state diagrams, thought streams, and action tapes while missions execute.
+
+### Architecture: The Spectator Pattern
+
+Visual Mode uses a **one-way "spectator" architecture** with zero performance overhead:
+
+```
+Main Process (LangGraph)          Streamlit Dashboard
+┌─────────────────────┐          ┌──────────────────┐
+│ Supervisor → Agent  │──JSON──▶ │ Polls every ~1s: │
+│ Playwright engine   │──JPEG──▶ │  .agent_state.json│
+│ (fire-and-forget)   │          │  .latest_vision.jpg│
+└─────────────────────┘          └──────────────────┘
+```
+
+The main process writes state atomically to `.agent_state.json` and async screenshots to `.latest_vision.jpg`. The dashboard polls these files. No IPC, no callbacks, no blocking.
+
+### Installation
+
+Visual Mode requires Streamlit as an optional dependency:
+
+```bash
+# Install with visual mode support
+pip install -e ".[visual]"
+
+# Or with uv:
+uv pip install -e ".[visual]"
+```
+
+### Usage
+
+Add the `--visual` flag to any mission:
+
+```bash
+# Standard mission with visual mode
+agent-explorer --missions missions/new_user_agent.yaml --visual
+
+# Visual mode with headed browser (recommended for debugging)
+agent-explorer --missions missions/explorer_agent.yaml --headed --visual
+
+# PR-driven testing with visual mode
+agent-explorer --pr-url https://github.com/org/repo/pull/123 --execute --visual
+
+# Regression testing with visual mode
+agent-explorer --regression --headed --visual
+```
+
+The Streamlit dashboard will automatically open in your default browser at `http://localhost:8501`. If it doesn't open automatically, navigate to that URL manually.
+
+### Dashboard Features
+
+The dashboard provides four key views:
+
+- **Sidebar**: Mission ID, graph type (standard/advanced), LLM provider, and live metrics (steps, bugs, explored paths)
+- **Live Browser Vision**: Real-time JPEG screenshots of the Playwright viewport, updated after each browser command
+- **Swarm State Diagram**: Interactive Mermaid diagram showing the Supervisor-Worker topology with the currently active node highlighted in green
+- **Tabbed Activity Views**:
+  - **Thought Stream**: Latest LLM reasoning from the active agent
+  - **Action Tape**: Recent browser commands with execution time and status
+  - **Bugs**: Discovered bugs with detailed descriptions and bug count
+  - **Paths**: URLs visited during the mission
+
+### Performance Impact
+
+**Zero** when `--visual` is not used — all emission code short-circuits on a single boolean check. When enabled:
+- State writes: ~1ms per update (2KB JSON + atomic `os.replace`)
+- Screenshots: Fire-and-forget async tasks (JPEG quality 50, ~30-80KB)
+- Main process never waits for the dashboard
 
 ---
 

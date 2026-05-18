@@ -1,6 +1,6 @@
 [project]
 name = "agentic-test-explorer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Product-agnostic agentic exploratory QA framework for web applications"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,6 +31,11 @@ dependencies = [
     "aiosqlite~=0.22.1",
     "httpx~=0.28.1",
     "langmem~=0.0.30",
+]
+
+[project.optional-dependencies]
+visual = [
+    "streamlit>=1.30.0",
 ]
 
 [build-system]

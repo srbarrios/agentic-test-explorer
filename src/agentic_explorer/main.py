@@ -185,6 +185,10 @@ async def run_missions():
         "--export-model", action="store_true",
         help="Export discovered application model from memory store as JSON",
     )
+    parser.add_argument(
+        "--visual", action="store_true",
+        help="Launch a Streamlit dashboard for real-time visual monitoring",
+    )
     args = parser.parse_args()
 
     # Load config.yaml early so its llm section can seed env var defaults.
@@ -211,6 +215,65 @@ async def run_missions():
     except RuntimeError as exc:
         raise ValueError(str(exc)) from exc
     console.model_info(get_active_provider(), get_model_name(probe_llm))
+
+    # ── Visual Mode setup ───────────────────────────────────────────
+    _dashboard_proc = None
+    if args.visual:
+        try:
+            import streamlit  # noqa: F401
+        except ImportError:
+            parser.error(
+                "--visual requires Streamlit. Install with: pip install agentic-test-explorer[visual]"
+            )
+
+        import atexit
+        import signal
+        import subprocess
+        import webbrowser
+        import time
+
+        from agentic_explorer.ui import state_emitter
+
+        # Clear any stale state from previous runs
+        state_emitter.cleanup()
+        state_emitter.enable()
+        state_emitter.update(
+            app_url=cfg.app.url,
+            provider=get_active_provider(),
+            model_name=get_model_name(probe_llm),
+        )
+
+        _dashboard_path = os.path.join(os.path.dirname(__file__), "ui", "dashboard.py")
+        _dashboard_proc = subprocess.Popen(
+            [
+                "streamlit", "run", _dashboard_path,
+                "--server.headless", "true",
+                "--browser.gatherUsageStats", "false",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        def _kill_dashboard():
+            if _dashboard_proc and _dashboard_proc.poll() is None:
+                _dashboard_proc.terminate()
+            # Don't cleanup immediately - let the dashboard show completion first
+            # state_emitter.cleanup()
+
+        atexit.register(_kill_dashboard)
+        _orig_sigint = signal.getsignal(signal.SIGINT)
+
+        def _signal_handler(sig, frame):
+            _kill_dashboard()
+            if callable(_orig_sigint):
+                _orig_sigint(sig, frame)
+
+        signal.signal(signal.SIGINT, _signal_handler)
+        console.success("Visual Mode dashboard launched (Streamlit)")
+
+        # Give Streamlit a moment to start, then open browser
+        time.sleep(2)
+        webbrowser.open("http://localhost:8501")
 
     if not args.missions and not args.pr_url and not args.regression and not args.export_model:
         parser.error("At least one of --missions, --pr-url, --regression, or --export-model is required")
@@ -266,6 +329,11 @@ async def run_missions():
             if os.path.exists(mem_file):
                 os.remove(mem_file)
                 console.info(f"Deleted {mem_file}")
+        # Also clear visual mode state files
+        for state_file in [".agent_state.json", ".agent_state.json.tmp", ".latest_vision.jpg"]:
+            if os.path.exists(state_file):
+                os.remove(state_file)
+                console.info(f"Deleted {state_file}")
     elif args.clear_checkpoints or args.clear_learned:
         import sqlite3
         db_path = "agent_memory.sqlite"
@@ -399,6 +467,23 @@ async def run_missions():
 
             console.mission_start(thread_id, mission_type)
 
+            if args.visual:
+                from agentic_explorer.ui import state_emitter
+                state_emitter.update(
+                    mission_id=thread_id,
+                    mission_type=mission_type,
+                    graph_type=mission_type.lower(),
+                    step_count=0,
+                    bugs_count=0,
+                    bugs_found=[],
+                    explored_paths=[],
+                    last_thought="",
+                    last_action="",
+                    action_tape_recent=[],
+                    active_node="",
+                )
+                state_emitter.emit()
+
             os.makedirs(f"report_{thread_id}", exist_ok=True)
             with open(f"report_{thread_id}/traces.log", "w", encoding="utf-8") as f:
                 f.write(f"=== TRACES: {thread_id} ===\n")
@@ -438,6 +523,21 @@ async def run_missions():
                                     console.state_update_end()
                                 current_node = node_name
                                 console.state_update(node_name)
+
+                                if args.visual:
+                                    from agentic_explorer.ui import state_emitter
+                                    active = state_update.get("next_agent", node_name) if node_name == "Supervisor" else node_name
+                                    update_dict = {"active_node": active}
+                                    if "bugs_found" in state_update:
+                                        bugs = state_update["bugs_found"]
+                                        update_dict["bugs_found"] = bugs
+                                        update_dict["bugs_count"] = len(bugs)
+                                    if "step_count" in state_update:
+                                        update_dict["step_count"] = state_update["step_count"]
+                                    if "explored_paths" in state_update:
+                                        update_dict["explored_paths"] = state_update["explored_paths"]
+                                    state_emitter.update(**update_dict)
+                                    state_emitter.emit()
 
                                 if "messages" in state_update and state_update["messages"]:
                                     messages = state_update["messages"] if isinstance(state_update["messages"], list) else [state_update["messages"]]
@@ -481,6 +581,11 @@ async def run_missions():
                                 text = _message_text(msg)
                                 if text.strip():
                                     console.info(f"HUMAN: {text[:120]}")
+
+                            if args.visual and isinstance(msg, AIMessage):
+                                from agentic_explorer.ui import state_emitter
+                                state_emitter.append_thought(node_name, _message_text(msg))
+                                state_emitter.emit()
 
                             # Trace file: full pretty_repr for every message (regardless of --quiet).
                             with open(trace_path, "a", encoding="utf-8") as trace_file:
@@ -618,6 +723,14 @@ async def run_missions():
             pass
 
         console.final_summary(len(missions))
+
+        # Mark visual mode as completed before closing
+        if args.visual:
+            from agentic_explorer.ui import state_emitter
+            state_emitter.mark_completed(total_missions=len(missions))
+            # Give dashboard time to show completion before we exit
+            await asyncio.sleep(2)
+
         await browser.close()
 
 def main():
