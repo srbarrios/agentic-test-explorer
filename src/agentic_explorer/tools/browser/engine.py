@@ -476,6 +476,15 @@ def get_browser_command_tool(page: Page):
         )
         _append_tape(thread_id, result.to_tape_entry())
 
+        from agentic_explorer.ui import state_emitter
+        if state_emitter.is_enabled():
+            state_emitter.schedule_screenshot(page)
+            state_emitter.update(
+                last_action=f"{action} {json.dumps(params, ensure_ascii=False)[:200]}",
+                action_tape_recent=get_action_tape(thread_id)[-15:],
+            )
+            state_emitter.emit()
+
         status = "OK" if result.ok else "ERROR"
         body = [
             f"STATUS: {status}",

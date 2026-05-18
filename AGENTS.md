@@ -167,6 +167,13 @@ The framework is configured through three user-supplied files (templates ship as
   about the application (unexpected behaviors, UX issues, successful strategies). These
   observations are stored in the `agent_observations` namespace and surfaced in the
   supervisor's `MEMORY_CONTEXT` in subsequent runs.
+* **Visual Mode** (`src/agentic_explorer/ui/`): Optional Streamlit-based real-time dashboard
+  for monitoring swarm execution. Uses a one-way "spectator" pattern with zero performance
+  overhead. The main process writes state to `.agent_state.json` (atomic via `os.replace`)
+  and async screenshots to `.latest_vision.jpg` (fire-and-forget). The dashboard polls
+  these files every ~1s. Enabled via `--visual` flag; requires `pip install -e ".[visual]"`.
+  Implementation: `state_emitter.py` (non-blocking state bridge), `swarm_diagram.py`
+  (Mermaid generator), `dashboard.py` (Streamlit app).
 
 ## Running the System
 
@@ -187,6 +194,10 @@ Execute missions defined in YAML format (see `missions/README.md`):
 * **Standard Run**: `agent-explorer --missions missions/new_user_agent.yaml`
 * **Explicit Provider**: `agent-explorer --missions missions/power_user_agent.yaml --provider claude`
 * **Headed Mode** (Debugging): `agent-explorer --missions missions/accessibility_user_agent.yaml --headed`
+* **Visual Mode** (Real-Time Dashboard): `agent-explorer --missions missions/explorer_agent.yaml --visual --headed`
+  — launches Streamlit dashboard at `http://localhost:8501` showing live screenshots, swarm
+  state diagram, thought stream, and action tape. Requires `pip install -e ".[visual]"`.
+  Zero performance overhead when not used.
 * **Clear All Memory**: `agent-explorer --missions missions/new_user_agent.yaml --clear-all`
 * **Clear Checkpoints Only**: `agent-explorer --missions missions/new_user_agent.yaml --clear-checkpoints`
   (preserves learned memory: pages, bugs, procedures)
@@ -274,3 +285,8 @@ Every mission generates artifacts localized in a `report_<thread_id>/` directory
   prompts expect parseable responses.
 * **App-Specific Details**: NEVER hardcode application URLs, credentials, selectors, MCP
   server URLs, or skill names in source. Read them from `config.yaml` / env / user files.
+* **Visual Mode Integration**: When adding new state fields to the swarm, emit them via
+  `state_emitter.update()` from the appropriate integration point (supervisor for step/bug
+  counts, agent nodes for thoughts, browser engine for actions). Always check
+  `state_emitter.is_enabled()` before emitting. See existing integrations in `main.py`,
+  `graph_base.py`, and `engine.py` for patterns.

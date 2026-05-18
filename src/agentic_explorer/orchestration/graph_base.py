@@ -242,6 +242,32 @@ def _print_react(msg: BaseMessage, node_name: str, max_chars: int) -> None:
 # Node factories
 # ---------------------------------------------------------
 
+def _sanitize_messages_for_model(messages: Sequence[BaseMessage]) -> List[BaseMessage]:
+    """Return a plain-text-only transcript safe for Anthropic adapters.
+
+    The inner agent already owns the active system prompt and tool-calling loop,
+    so historical state is passed as narrative context only:
+    - drop all SystemMessage entries (prevents non-consecutive system blocks)
+    - drop all ToolMessage entries (prevents orphaned tool_result blocks)
+    - normalize remaining Human/AI messages to plain text content only
+    """
+    sanitized: List[BaseMessage] = []
+    for msg in messages:
+        if isinstance(msg, (SystemMessage, ToolMessage)):
+            continue
+
+        text = _msg_text(msg).strip()
+        if not text:
+            continue
+
+        if isinstance(msg, HumanMessage):
+            sanitized.append(HumanMessage(content=text))
+        elif isinstance(msg, AIMessage):
+            sanitized.append(AIMessage(content=text))
+
+    return sanitized
+
+
 def make_agent_node(agent, *, name: str = "agent", quiet: bool = False, app_url_hash: str = ""):
     """Return an async LangGraph node function that streams agent messages in real-time.
 
@@ -251,15 +277,28 @@ def make_agent_node(agent, *, name: str = "agent", quiet: bool = False, app_url_
     _max = 120 if quiet else 500
 
     async def _node(state: AgentState, config=None, *, store=None) -> dict:
+        from agentic_explorer.ui import state_emitter
+        if state_emitter.is_enabled():
+            state_emitter.update(active_node=name)
+            state_emitter.emit()
+
         thread_id = (
             (config or {}).get("configurable", {}).get("thread_id", "default")
             if config else "default"
         )
         before = len(get_action_tape(thread_id))
 
+        # Sanitize messages before passing to the inner agent to avoid Anthropic API
+        # errors (non-consecutive system messages, orphaned tool_result blocks).
+        filtered_state = dict(state)
+        if "messages" in filtered_state:
+            filtered_state["messages"] = _sanitize_messages_for_model(
+                filtered_state["messages"]
+            )
+
         out: dict = {}
         seen_count = 0
-        async for snapshot in agent.astream(state, config=config):
+        async for snapshot in agent.astream(filtered_state, config=config):
             out = snapshot
             messages = snapshot.get("messages", [])
             for msg in messages[seen_count:]:
@@ -370,6 +409,17 @@ def make_supervisor_node(llm, agent_names: tuple, app_url: str, max_steps: int, 
         result: dict = {"next_agent": decision["next"], "step_count": current_step}
         if extra_messages:
             result["messages"] = extra_messages
+
+        from agentic_explorer.ui import state_emitter
+        if state_emitter.is_enabled():
+            state_emitter.update(
+                active_node=decision["next"],
+                step_count=current_step,
+                bugs_count=len(state.get("bugs_found", [])),
+                explored_paths=list(dict.fromkeys(state.get("explored_paths", [])))[:20],
+            )
+            state_emitter.emit()
+
         return result
 
     return supervisor_node
@@ -387,7 +437,7 @@ def make_summarizer_node(*, keep_recent: int = _SUMMARIZER_KEEP_RECENT):
     """Return a node that compresses old messages to prevent unbounded state growth.
 
     Keeps the first HumanMessage (mission prompt) and the ``keep_recent`` most
-    recent messages. Messages in between are replaced with a single SystemMessage
+    recent messages. Messages in between are replaced with a single HumanMessage
     containing a compact text summary — no LLM call required.
     """
 
@@ -429,7 +479,7 @@ def make_summarizer_node(*, keep_recent: int = _SUMMARIZER_KEEP_RECENT):
             return {}
 
         return {
-            "messages": removals + [SystemMessage(content=summary_text)],
+            "messages": removals + [HumanMessage(content=summary_text)],
         }
 
     return summarizer_node

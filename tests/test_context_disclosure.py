@@ -1,11 +1,11 @@
 import unittest
 from typing import cast
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agentic_explorer.config import AppMeta
 from agentic_explorer.main import _bound_transcript_for_report, REPORT_TRANSCRIPT_MAX_CHARS
-from agentic_explorer.orchestration.graph_base import AgentState, _build_routing_context
+from agentic_explorer.orchestration.graph_base import AgentState, _build_routing_context, _sanitize_messages_for_model
 from agentic_explorer.pr_analyzer import (
     PRData,
     PR_GENERATED_MISSION_PROMPT_MAX_CHARS,
@@ -16,6 +16,34 @@ from agentic_explorer.pr_analyzer import (
 
 
 class ContextDisclosureTests(unittest.TestCase):
+    def test_sanitize_messages_for_model_removes_system_and_tool_messages(self):
+        messages = [
+            SystemMessage(content="system"),
+            HumanMessage(content="mission"),
+            AIMessage(content="thinking"),
+            ToolMessage(content="tool output", name="execute_browser_command", tool_call_id="call-1"),
+        ]
+
+        sanitized = _sanitize_messages_for_model(messages)
+
+        self.assertEqual(len(sanitized), 2)
+        self.assertIsInstance(sanitized[0], HumanMessage)
+        self.assertEqual(sanitized[0].content, "mission")
+        self.assertIsInstance(sanitized[1], AIMessage)
+        self.assertEqual(sanitized[1].content, "thinking")
+
+    def test_sanitize_messages_for_model_drops_non_text_content_blocks(self):
+        messages = [
+            HumanMessage(content=[{"type": "tool_result", "tool_use_id": "x", "content": "y"}]),
+            AIMessage(content="next step"),
+        ]
+
+        sanitized = _sanitize_messages_for_model(messages)
+
+        self.assertEqual(len(sanitized), 1)
+        self.assertIsInstance(sanitized[0], AIMessage)
+        self.assertEqual(sanitized[0].content, "next step")
+
     def test_report_transcript_at_limit_is_unchanged(self):
         transcript = "x" * REPORT_TRANSCRIPT_MAX_CHARS
         self.assertEqual(_bound_transcript_for_report(transcript), transcript)
