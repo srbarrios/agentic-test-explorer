@@ -166,6 +166,12 @@ def _main() -> None:
         st.markdown("### Mission Control")
         st.markdown(f"**App URL:**  \n{state.get('app_url', 'N/A')}")
         st.markdown(f"**Mission:**  \n`{state.get('mission_id', 'N/A')}`")
+
+        mission_desc = state.get("mission_description", "")
+        if mission_desc:
+            short_desc = mission_desc[:200] + ("..." if len(mission_desc) > 200 else "")
+            st.caption(short_desc)
+
         st.markdown(f"**Graph:** `{state.get('mission_type', 'N/A')}`")
         st.markdown(
             f"**Provider:** `{state.get('provider', 'N/A')}` · `{state.get('model_name', '')}`"
@@ -227,9 +233,34 @@ def _main() -> None:
 
     # Column 3: Information Tabs
     with col_info:
-        thought_tab, tape_tab, bugs_tab, paths_tab = st.tabs(
-            ["Thought Stream", "Action Tape", "Bugs", "Paths"],
+        missions_tab, thought_tab, tape_tab, bugs_tab, paths_tab = st.tabs(
+            ["Missions", "Thought Stream", "Action Tape", "Bugs", "Paths"],
         )
+
+        with missions_tab:
+            history = state.get("mission_history", [])
+            running = [m for m in history if m.get("status") == "running"]
+            completed = [m for m in history if m.get("status") == "completed"]
+
+            if running:
+                st.markdown(f"**Running** ({len(running)})")
+                for m in running:
+                    elapsed = time.time() - m.get("start_time", 0)
+                    with st.expander(f"▶ {m['id']} ({elapsed:.0f}s)", expanded=True):
+                        st.caption(f"**Type:** {m.get('type', 'N/A')}")
+                        st.text(m.get("description", "")[:300])
+
+            if completed:
+                st.markdown(f"**Completed** ({len(completed)})")
+                for m in reversed(completed):
+                    duration = (m.get("end_time") or 0) - (m.get("start_time") or 0)
+                    label = f"✅ {m['id']} ({duration:.0f}s · {m.get('bugs_count', 0)} bugs · {m.get('steps', 0)} steps)"
+                    with st.expander(label):
+                        st.caption(f"**Type:** {m.get('type', 'N/A')}")
+                        st.text(m.get("description", "")[:300])
+
+            if not history:
+                st.info("No missions yet.")
 
         with thought_tab:
             stream = state.get("thought_stream", [])

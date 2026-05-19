@@ -471,6 +471,7 @@ async def run_missions():
                 from agentic_explorer.ui import state_emitter
                 state_emitter.update(
                     mission_id=thread_id,
+                    mission_description=prompt,
                     mission_type=mission_type,
                     graph_type=mission_type.lower(),
                     step_count=0,
@@ -482,6 +483,7 @@ async def run_missions():
                     action_tape_recent=[],
                     active_node="",
                 )
+                state_emitter.start_mission(thread_id, prompt, mission_type)
                 state_emitter.emit()
 
             os.makedirs(f"report_{thread_id}", exist_ok=True)
@@ -700,6 +702,12 @@ async def run_missions():
                 pass
 
             console.mission_done(thread_id, len(tape), len(bugs_found))
+
+            if args.visual:
+                from agentic_explorer.ui import state_emitter
+                state_emitter.end_mission(thread_id)
+                state_emitter.emit()
+
             with open(f"report_{thread_id}/test_report.md", "a", encoding="utf-8") as report_file:
                 report_file.write(
                     f"\n## Action Tape\n\n"
