@@ -165,6 +165,81 @@ class StateEmitterTests(unittest.TestCase):
         self.assertFalse(state_emitter._state.completed)
         self.assertFalse(os.path.exists(state_emitter.STATE_FILE))
 
+    def test_update_sets_mission_description(self):
+        state_emitter.enable()
+        state_emitter.update(mission_description="Explore the login flow")
+        self.assertEqual(state_emitter._state.mission_description, "Explore the login flow")
+
+    def test_start_mission_appends_running_entry(self):
+        state_emitter.enable()
+        state_emitter.start_mission("mission_01", "Test the home page", "STANDARD")
+
+        history = state_emitter._state.mission_history
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["id"], "mission_01")
+        self.assertEqual(history[0]["description"], "Test the home page")
+        self.assertEqual(history[0]["type"], "STANDARD")
+        self.assertEqual(history[0]["status"], "running")
+        self.assertIsNotNone(history[0]["start_time"])
+        self.assertIsNone(history[0]["end_time"])
+
+    def test_start_mission_is_noop_when_disabled(self):
+        state_emitter.start_mission("m1", "desc", "STANDARD")
+        self.assertEqual(len(state_emitter._state.mission_history), 0)
+
+    def test_end_mission_marks_running_as_completed(self):
+        state_emitter.enable()
+        state_emitter.start_mission("mission_01", "Test login", "STANDARD")
+        state_emitter.update(step_count=15, bugs_count=2)
+        state_emitter.end_mission("mission_01")
+
+        entry = state_emitter._state.mission_history[0]
+        self.assertEqual(entry["status"], "completed")
+        self.assertIsNotNone(entry["end_time"])
+        self.assertEqual(entry["bugs_count"], 2)
+        self.assertEqual(entry["steps"], 15)
+
+    def test_end_mission_is_noop_when_disabled(self):
+        state_emitter.enable()
+        state_emitter.start_mission("m1", "desc", "STANDARD")
+        state_emitter._enabled = False
+        state_emitter.end_mission("m1")
+        self.assertEqual(state_emitter._state.mission_history[0]["status"], "running")
+
+    def test_end_mission_ignores_unknown_id(self):
+        state_emitter.enable()
+        state_emitter.start_mission("m1", "desc", "STANDARD")
+        state_emitter.end_mission("nonexistent")
+        self.assertEqual(state_emitter._state.mission_history[0]["status"], "running")
+
+    def test_multiple_missions_tracked_independently(self):
+        state_emitter.enable()
+        state_emitter.start_mission("m1", "First mission", "STANDARD")
+        state_emitter.update(step_count=5, bugs_count=1)
+        state_emitter.end_mission("m1")
+
+        state_emitter.start_mission("m2", "Second mission", "ADVANCED")
+
+        history = state_emitter._state.mission_history
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[0]["status"], "completed")
+        self.assertEqual(history[0]["bugs_count"], 1)
+        self.assertEqual(history[1]["status"], "running")
+        self.assertEqual(history[1]["id"], "m2")
+
+    def test_mission_history_emitted_to_json(self):
+        state_emitter.enable()
+        state_emitter.start_mission("m1", "Test desc", "STANDARD")
+        state_emitter.emit()
+
+        with open(state_emitter.STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        self.assertEqual(len(data["mission_history"]), 1)
+        self.assertEqual(data["mission_history"][0]["id"], "m1")
+        self.assertEqual(data["mission_history"][0]["description"], "Test desc")
+        self.assertEqual(data["mission_description"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

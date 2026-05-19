@@ -28,6 +28,7 @@ _enabled: bool = False
 class VisualState:
     active_node: str = ""
     mission_id: str = ""
+    mission_description: str = ""
     mission_type: str = ""
     graph_type: str = ""
     step_count: int = 0
@@ -44,6 +45,7 @@ class VisualState:
     timestamp: float = 0.0
     completed: bool = False
     total_missions: int = 0
+    mission_history: List[Dict[str, Any]] = field(default_factory=list)
 
 
 _state = VisualState()
@@ -105,6 +107,33 @@ def schedule_screenshot(page: Page) -> None:
         loop.create_task(_capture_screenshot(page))
     except RuntimeError:
         pass
+
+
+def start_mission(mission_id: str, description: str, mission_type: str) -> None:
+    if not _enabled:
+        return
+    _state.mission_history.append({
+        "id": mission_id,
+        "description": description,
+        "type": mission_type,
+        "status": "running",
+        "start_time": time.time(),
+        "end_time": None,
+        "bugs_count": 0,
+        "steps": 0,
+    })
+
+
+def end_mission(mission_id: str) -> None:
+    if not _enabled:
+        return
+    for entry in _state.mission_history:
+        if entry["id"] == mission_id and entry["status"] == "running":
+            entry["status"] = "completed"
+            entry["end_time"] = time.time()
+            entry["bugs_count"] = _state.bugs_count
+            entry["steps"] = _state.step_count
+            break
 
 
 def mark_completed(total_missions: int = 0) -> None:
