@@ -30,7 +30,22 @@ BROWSER_AGENT_RULES = (
     "snapshot, check_page_health. Selector policy: prefer data-test-subj, then ARIA/roles, "
     "then semantic text; never use XPath, nth-child/nth-of-type, or guessed structural CSS. "
     "Failure policy: on any UI error, missing element, tool failure, or visual anomaly, call "
-    "capture_bug_screenshot, then generate_reproduction_spec immediately."
+    "capture_bug_screenshot, then generate_reproduction_spec immediately. "
+    "Bug reporting format (MANDATORY): your FINAL message before yielding control MUST "
+    "contain a single <bugs_found>...</bugs_found> block listing EVERY distinct issue you "
+    "observed during this turn — one JSON entry per issue. Count as an issue: any UI bug, "
+    "validation error, missing element, broken interaction, visual anomaly, accessibility "
+    "violation, missing label, missing empty-state messaging, missing progress indicator, "
+    "missing tooltip/help, confusing flow, or any UX gap you would flag in a code review. "
+    "Do NOT aggregate multiple issues into one entry. Do NOT omit minor issues — list them "
+    "all. If you found zero issues, emit <bugs_found>[]</bugs_found> explicitly. Each entry "
+    'must be: {"title": "<short imperative>", "summary": "<what + where + repro hint>", '
+    '"location": "<url or selector>", "severity": "critical|major|minor"}. Example: '
+    '<bugs_found>[{"title": "Login validation race", "summary": "Filling fields rapidly '
+    'then clicking submit shows a required-field error for an already-filled field", '
+    '"location": "/login", "severity": "major"}, {"title": "Empty cart lacks messaging", '
+    '"summary": "Cart page shows no guidance text when empty", "location": "/cart", '
+    '"severity": "minor"}]</bugs_found>'
 )
 
 
@@ -89,14 +104,132 @@ def filter_base_tools(base_tools: list) -> list:
 # Message introspection helpers
 # ---------------------------------------------------------
 
-def _extract_bugs(messages: Sequence[BaseMessage]) -> List[str]:
-    """Pull bug summaries out of capture_bug_screenshot ToolMessage results."""
+_BUGS_TAG_RE = re.compile(r"<bugs_found>\s*(.*?)\s*</bugs_found>", re.DOTALL)
+# Conservative fallback: only fire on explicit "BUG FOUND" / "BUG:" prefixes,
+# optionally bold-wrapped, at line/sentence start. Avoids false positives from
+# narrative mentions of "bug" elsewhere in summaries.
+_BUG_PROSE_RE = re.compile(
+    r"(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?\s*(?:BUG\s+FOUND|BUG|ISSUE\s+FOUND)\s*(?:\*\*)?\s*[:\-—]\s*([^\n]{8,300})",
+    re.IGNORECASE,
+)
+
+
+def _normalize_bug_key(text: str) -> str:
+    """Normalize a bug entry to a stable comparable form.
+
+    Agents emit the same finding in three different shapes:
+    - snake_case slug from ``capture_bug_screenshot`` (``form_validation_race``)
+    - structured title:summary from the closing tag
+    - prose like ``BUG FOUND: Empty cart lacks messaging on /cart page.``
+
+    Title-prefix matching (``_is_dup_key``) collapses these together.
+    """
+    title = text.split(":", 1)[0] if ":" in text else text
+    title = title.split(".", 1)[0]
+    return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()[:60]
+
+
+def _is_dup_key(new_key: str, seen_keys: List[str], *, min_overlap: int = 12) -> bool:
+    """True if ``new_key`` is essentially the same bug as one already seen.
+
+    Match when either key fully prefixes the other and the shorter side has
+    at least ``min_overlap`` chars, so two genuinely different bugs that
+    share an opening word ('Login error', 'Login redirect') stay separate.
+    """
+    for existing in seen_keys:
+        short, long = (new_key, existing) if len(new_key) <= len(existing) else (existing, new_key)
+        if len(short) >= min_overlap and long.startswith(short):
+            return True
+    return False
+
+
+def dedupe_bugs(bugs: List[str]) -> List[str]:
+    """Return *bugs* with duplicates removed (first-seen order preserved)."""
+    out: List[str] = []
+    seen: List[str] = []
+    for bug in bugs:
+        key = _normalize_bug_key(bug)
+        if not key or _is_dup_key(key, seen):
+            continue
+        seen.append(key)
+        out.append(bug)
+    return out
+
+
+def _extract_bugs_from_text(text: str) -> List[str]:
+    """Extract bug descriptions from ``<bugs_found>`` JSON blocks, with prose fallback."""
+    import json as _json
+
     bugs: List[str] = []
+    seen_keys: List[str] = []
+
+    def _add(entry: str) -> None:
+        entry = entry.strip(": ").strip()[:500]
+        if not entry:
+            return
+        key = _normalize_bug_key(entry)
+        if not key or _is_dup_key(key, seen_keys):
+            return
+        seen_keys.append(key)
+        bugs.append(entry)
+
+    tag_matched = False
+    for m in _BUGS_TAG_RE.finditer(text):
+        tag_matched = True
+        try:
+            entries = _json.loads(m.group(1))
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict):
+                title = entry.get("title", "")
+                summary = entry.get("summary", "")
+                _add(f"{title}: {summary}")
+            elif isinstance(entry, str):
+                _add(entry)
+
+    # Prose fallback: catches "BUG FOUND: ..." prefixes the agent emits in
+    # narrative summaries instead of (or alongside) the structured tag.
+    # Always merged with dedupe so well-formed agents aren't double-counted.
+    for m in _BUG_PROSE_RE.finditer(text):
+        _add(m.group(1))
+
+    return bugs
+
+
+def _extract_bugs(messages: Sequence[BaseMessage]) -> List[str]:
+    """Pull bug summaries from capture_bug_screenshot calls and agent text.
+
+    For each screenshot tool call, the agent passes the bug title in
+    ``bug_summary`` — captured from AIMessage.tool_calls since the
+    ToolMessage result ("Evidence captured!...") drops that argument.
+    """
+    bugs: List[str] = []
+    seen_keys: List[str] = []
+
+    def _add(entry: str) -> None:
+        entry = entry.strip(": ").strip()[:500]
+        if not entry:
+            return
+        key = _normalize_bug_key(entry)
+        if not key or _is_dup_key(key, seen_keys):
+            return
+        seen_keys.append(key)
+        bugs.append(entry)
+
     for msg in messages:
-        if isinstance(msg, ToolMessage) and getattr(msg, "name", "") == "capture_bug_screenshot":
-            content = str(msg.content)
-            if "Evidence captured" in content or "screenshot" in content.lower():
-                bugs.append(content[:300])
+        if isinstance(msg, AIMessage):
+            for tc in getattr(msg, "tool_calls", None) or []:
+                if tc.get("name") == "capture_bug_screenshot":
+                    args = tc.get("args") or {}
+                    summary = args.get("bug_summary") if isinstance(args, dict) else None
+                    if summary:
+                        _add(str(summary))
+            for extracted in _extract_bugs_from_text(_msg_text(msg)):
+                _add(extracted)
+
     return bugs
 
 
@@ -303,6 +436,11 @@ def make_agent_node(agent, *, name: str = "agent", quiet: bool = False, app_url_
             messages = snapshot.get("messages", [])
             for msg in messages[seen_count:]:
                 _print_react(msg, name, _max)
+                if state_emitter.is_enabled() and isinstance(msg, AIMessage):
+                    text = _msg_text(msg)
+                    if text.strip():
+                        state_emitter.append_thought(name, text)
+                        state_emitter.emit()
             seen_count = len(messages)
 
         new_messages: Sequence[BaseMessage] = out.get("messages", [])
