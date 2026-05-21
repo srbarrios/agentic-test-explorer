@@ -20,7 +20,7 @@ areas most likely impacted by the changes.
 
 ## 🎬 Demo
 
-<video src="https://github.com/srbarrios/agentic-test-explorer/assets/demo.mov" controls width="100%"></video>
+<video src="demo.mov" controls width="100%"></video>
 
 ---
 
