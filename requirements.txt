@@ -148,7 +148,7 @@ httpx-sse==0.4.3
     #   langchain-community
     #   langchain-google-vertexai
     #   mcp
-idna==3.14
+idna==3.15
     # via
     #   anyio
     #   httpx
