@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List
@@ -22,6 +23,27 @@ STATE_FILE = ".agent_state.json"
 SCREENSHOT_FILE = ".latest_vision.jpg"
 
 _enabled: bool = False
+
+
+def _normalize_bug_key(text: str) -> str:
+    """Dedupe key derived from the bug title (text before first ``:`` or ``.``).
+
+    Mirrors the graph-side extractor so the Visual Mode counter agrees with
+    the framework-merged ``bugs_found`` set across the three shapes agents
+    emit (screenshot slug, structured tag entry, prose ``BUG FOUND:`` line).
+    """
+    title = text.split(":", 1)[0] if ":" in text else text
+    title = title.split(".", 1)[0]
+    return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()[:60]
+
+
+def _is_dup_bug(new_key: str, seen_keys: List[str], *, min_overlap: int = 12) -> bool:
+    """Treat two keys as the same bug when one fully prefixes the other."""
+    for existing in seen_keys:
+        short, long = (new_key, existing) if len(new_key) <= len(existing) else (existing, new_key)
+        if len(short) >= min_overlap and long.startswith(short):
+            return True
+    return False
 
 
 @dataclass
@@ -71,11 +93,52 @@ def update(**kwargs: Any) -> None:
 MAX_THOUGHT_STREAM = 200
 
 
+def add_bugs(bugs: List[str]) -> None:
+    """Append new bug summaries and keep ``bugs_count`` in sync.
+
+    The graph state uses an ``operator.add`` reducer for ``bugs_found``, so
+    stream updates deliver only the per-node delta — never the cumulative
+    list. Use this helper (instead of ``update(bugs_found=...)``) to merge
+    those deltas into the emitter without dropping previously seen bugs.
+
+    Duplicates (same title, case- and punctuation-insensitive) are skipped
+    so an agent re-summarizing the same finding across iterations does not
+    inflate the Visual Mode counter.
+    """
+    if not _enabled or not bugs:
+        return
+    seen = [_normalize_bug_key(b) for b in _state.bugs_found if _normalize_bug_key(b)]
+    for bug in bugs:
+        key = _normalize_bug_key(bug)
+        if not key or _is_dup_bug(key, seen):
+            continue
+        seen.append(key)
+        _state.bugs_found.append(bug)
+    _state.bugs_count = len(_state.bugs_found)
+
+
+def add_paths(paths: List[str]) -> None:
+    """Append new explored URL paths, preserving first-seen order and deduplicating."""
+    if not _enabled or not paths:
+        return
+    seen = set(_state.explored_paths)
+    for p in paths:
+        if p in seen:
+            continue
+        _state.explored_paths.append(p)
+        seen.add(p)
+
+
 def append_thought(node: str, text: str) -> None:
     if not _enabled or not text.strip():
         return
+    trimmed = text[:1000]
+    if _state.thought_stream:
+        last = _state.thought_stream[-1]
+        if last["node"] == node and last["text"] == trimmed:
+            return
     _state.thought_stream.append(
-        {"node": node, "text": text[:1000], "ts": time.time()}
+        {"node": node, "text": trimmed, "ts": time.time()}
     )
     if len(_state.thought_stream) > MAX_THOUGHT_STREAM:
         _state.thought_stream = _state.thought_stream[-MAX_THOUGHT_STREAM:]

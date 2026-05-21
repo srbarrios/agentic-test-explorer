@@ -66,7 +66,7 @@ def _default_gemini_model() -> str:
     if model := os.getenv("GEMINI_MODEL"):
         return model
     # OAuth (Gemini Advanced subscription) → use best model; API key → economical
-    return "gemini-2.5-flash" if os.getenv("GOOGLE_API_KEY") else "gemini-3.1-flash"
+    return "gemini-3.1-flash-lite" if os.getenv("GOOGLE_API_KEY") else "gemini-3.1-flash"
 
 
 def _default_claude_model() -> str:
@@ -88,7 +88,12 @@ def _make_gemini_llm(temperature: float, model_name: Optional[str]) -> Any:
                 "Set GOOGLE_API_KEY or run 'gemini auth login'."
             )
         from google.oauth2.credentials import Credentials  # type: ignore[import-untyped]
-        kwargs["credentials"] = Credentials.from_authorized_user_file(str(_OAUTH_CREDS_PATH))
+        with open(_OAUTH_CREDS_PATH, "r", encoding="utf-8") as fh:
+            creds_data = json.load(fh)
+        kwargs["credentials"] = Credentials(
+            token=creds_data.get("access_token"),
+            refresh_token=creds_data.get("refresh_token"),
+        )
     return ChatGoogleGenerativeAI(**kwargs)
 
 

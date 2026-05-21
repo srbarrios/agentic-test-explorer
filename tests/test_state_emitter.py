@@ -227,6 +227,83 @@ class StateEmitterTests(unittest.TestCase):
         self.assertEqual(history[1]["status"], "running")
         self.assertEqual(history[1]["id"], "m2")
 
+    def test_add_bugs_accumulates_and_updates_count(self):
+        state_emitter.enable()
+        state_emitter.add_bugs(["bug A"])
+        state_emitter.add_bugs(["bug B", "bug C"])
+
+        self.assertEqual(state_emitter._state.bugs_found, ["bug A", "bug B", "bug C"])
+        self.assertEqual(state_emitter._state.bugs_count, 3)
+
+    def test_add_bugs_is_noop_when_disabled(self):
+        state_emitter.add_bugs(["should not appear"])
+        self.assertEqual(state_emitter._state.bugs_found, [])
+        self.assertEqual(state_emitter._state.bugs_count, 0)
+
+    def test_add_bugs_skips_empty_input(self):
+        state_emitter.enable()
+        state_emitter.add_bugs([])
+        self.assertEqual(state_emitter._state.bugs_count, 0)
+
+    def test_add_bugs_dedupes_case_and_punctuation(self):
+        """Agents re-summarize the same finding across turns; the counter
+        must not inflate on each repeat."""
+        state_emitter.enable()
+        state_emitter.add_bugs(["Login Validation Race: required-field error"])
+        state_emitter.add_bugs([
+            "login validation race: required-field error",  # case-only diff
+            "Login Validation Race -- required-field error",  # punctuation diff
+            "Empty Cart Lacks Messaging: no guidance text",  # genuinely new
+        ])
+        self.assertEqual(state_emitter._state.bugs_count, 2)
+        self.assertEqual(len(state_emitter._state.bugs_found), 2)
+
+    def test_add_paths_deduplicates(self):
+        state_emitter.enable()
+        state_emitter.add_paths(["/a", "/b"])
+        state_emitter.add_paths(["/b", "/c"])
+
+        self.assertEqual(state_emitter._state.explored_paths, ["/a", "/b", "/c"])
+
+    def test_add_paths_is_noop_when_disabled(self):
+        state_emitter.add_paths(["/x"])
+        self.assertEqual(state_emitter._state.explored_paths, [])
+
+    def test_bug_counter_matches_cumulative_across_agent_deltas(self):
+        """Regression: emitter must accumulate per-node bug deltas (operator.add
+        reducer in AgentState), not overwrite with the last delta. Previously,
+        the Visual Mode 'Bugs' counter showed only the final agent's delta
+        while the end-of-mission report listed the full cumulative set."""
+        state_emitter.enable()
+
+        # Simulate mission start (per main.py initial visual state reset).
+        state_emitter.update(bugs_count=0, bugs_found=[], explored_paths=[])
+
+        # Simulate the stream of per-node deltas main.py receives from LangGraph
+        # in stream_mode="updates": each agent returns only the NEW bugs it
+        # found, not the cumulative list.
+        agent_deltas = [
+            {"bugs_found": ["bug from agent_1"]},
+            {"bugs_found": ["bug from agent_2", "second bug from agent_2"]},
+            {"bugs_found": ["bug from agent_3"]},
+        ]
+        for delta in agent_deltas:
+            if "bugs_found" in delta:
+                state_emitter.add_bugs(delta["bugs_found"])
+
+        # End-of-mission report uses the framework-merged cumulative state and
+        # would show 4 bugs; the Visual Mode counter must agree.
+        self.assertEqual(state_emitter._state.bugs_count, 4)
+        self.assertEqual(len(state_emitter._state.bugs_found), 4)
+        self.assertIn("bug from agent_1", state_emitter._state.bugs_found)
+        self.assertIn("bug from agent_3", state_emitter._state.bugs_found)
+
+        # end_mission snapshots bugs_count into the mission history entry —
+        # which is what powers the 'Completed missions' chips in the dashboard.
+        state_emitter.start_mission("m1", "desc", "STANDARD")
+        state_emitter.end_mission("m1")
+        self.assertEqual(state_emitter._state.mission_history[0]["bugs_count"], 4)
+
     def test_mission_history_emitted_to_json(self):
         state_emitter.enable()
         state_emitter.start_mission("m1", "Test desc", "STANDARD")

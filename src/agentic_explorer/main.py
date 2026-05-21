@@ -32,6 +32,7 @@ from agentic_explorer.tools.common.custom_tools import (
     fetch_agent_skill,
     run_agent_skill_script,
 )
+from agentic_explorer.orchestration.graph_base import dedupe_bugs
 from agentic_explorer.orchestration.standard_graph import build_graph
 from agentic_explorer.orchestration.advanced_graph import build_advanced_graph
 
@@ -530,15 +531,16 @@ async def run_missions():
                                     from agentic_explorer.ui import state_emitter
                                     active = state_update.get("next_agent", node_name) if node_name == "Supervisor" else node_name
                                     update_dict = {"active_node": active}
-                                    if "bugs_found" in state_update:
-                                        bugs = state_update["bugs_found"]
-                                        update_dict["bugs_found"] = bugs
-                                        update_dict["bugs_count"] = len(bugs)
                                     if "step_count" in state_update:
                                         update_dict["step_count"] = state_update["step_count"]
-                                    if "explored_paths" in state_update:
-                                        update_dict["explored_paths"] = state_update["explored_paths"]
                                     state_emitter.update(**update_dict)
+                                    # bugs_found and explored_paths arrive as per-node DELTAS
+                                    # (operator.add reducer in AgentState); accumulate them
+                                    # rather than overwrite so the cumulative count is preserved.
+                                    if "bugs_found" in state_update:
+                                        state_emitter.add_bugs(state_update["bugs_found"])
+                                    if "explored_paths" in state_update:
+                                        state_emitter.add_paths(state_update["explored_paths"])
                                     state_emitter.emit()
 
                                 if "messages" in state_update and state_update["messages"]:
@@ -617,7 +619,7 @@ async def run_missions():
             console.step(f"Generating report for {thread_id}...")
             final_state = await app.aget_state(run_config)
             mission_history = final_state.values.get("messages", [])
-            bugs_found = final_state.values.get("bugs_found", [])
+            bugs_found = dedupe_bugs(final_state.values.get("bugs_found", []))
 
             transcript_lines = []
             for msg in mission_history:

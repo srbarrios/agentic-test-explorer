@@ -18,6 +18,12 @@ areas most likely impacted by the changes.
 
 ---
 
+## 🎬 Demo
+
+<video src="https://github.com/srbarrios/agentic-test-explorer/assets/demo.mov" controls width="100%"></video>
+
+---
+
 ## 🏗️ Architecture
 
 The framework is built on a **Supervisor-Worker Swarm** pattern. Based on the mission type
@@ -283,8 +289,8 @@ AGENT_SKILL_SCRIPT_TIMEOUT="60"
 |-------------|---------------|-----------|
 | Claude API key | `claude-haiku-4-5` | Fast, economical |
 | Claude Vertex AI | `claude-haiku-4-5` | Fast, economical |
-| Gemini API key | `gemini-2.5-flash` | Fast, economical |
-| Gemini OAuth | `gemini-3.1-flash` | Subscription, fast |
+| Gemini API key | `gemini-3.1-flash-lite` | Fast, economical |
+| Gemini OAuth | `gemini-3.1-flash-lite` | Fast, economical |
 
 Override models via env vars (`CLAUDE_MODEL`, `GEMINI_MODEL`) or in `config.yaml` (see below).
 
@@ -315,8 +321,8 @@ llm:
   # provider: claude              # or: gemini
   # claude_model: claude-sonnet-4-6
   # claude_vision_model: claude-haiku-4-5
-  # gemini_model: gemini-2.5-flash
-  # gemini_vision_model: gemini-2.5-flash
+  # gemini_model: gemini-3.1-flash-lite
+  # gemini_vision_model: gemini-3.1-flash-lite
 
   # Embedding model for semantic search in long-term memory (optional).
   # When configured, recall_past_findings uses vector similarity instead of

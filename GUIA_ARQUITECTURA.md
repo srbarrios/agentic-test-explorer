@@ -909,7 +909,7 @@ llm = ChatAnthropic(
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
+    model="gemini-3.1-flash-lite",
     temperature=0,
 )
 ```
@@ -954,8 +954,8 @@ El proyecto selecciona modelos diferentes segun el metodo de autenticacion:
 |---|---|---|---|
 | Claude | API Key directa | `claude-haiku-4-5` | Economico para desarrollo |
 | Claude | Vertex AI (GCP) | `claude-haiku-4-5` | Economico para desarrollo |
-| Gemini | API Key | `gemini-2.5-flash` | Economico, rapido |
-| Gemini | OAuth | `gemini-3.1-flash` | Rapido con suscripcion |
+| Gemini | API Key | `gemini-3.1-flash-lite` | Economico, rapido |
+| Gemini | OAuth | `gemini-3.1-flash-lite` | Economico, rapido |
 
 ### Structured Output: Como el LLM responde con JSON
 
