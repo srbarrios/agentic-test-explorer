@@ -20,7 +20,7 @@ areas most likely impacted by the changes.
 
 ## 🎬 Demo
 
-<video src="demo.mov" controls width="100%"></video>
+https://github.com/user-attachments/assets/9a17d846-5bee-4055-a97a-f9dd7ee191c2
 
 ---
 
