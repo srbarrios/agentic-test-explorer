@@ -573,6 +573,13 @@ for the conventions covering agent registration, selector policy, and tool behav
 
 ---
 
+## 👤 Author
+
+Created and maintained by [Oscar Barrios](https://oscarbarrios.tech) (QE Architect, working on test automation, TestOps and agentic AI for testing).
+Read the write-up on [oscarbarrios.tech](https://oscarbarrios.tech/agentic-test-explorer/), and feel free to open an issue or a pull request with feedback.
+
+---
+
 ## 📄 License
 
 This project is licensed under the MIT License. See [`LICENSE`](LICENSE) for details.
