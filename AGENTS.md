@@ -183,6 +183,13 @@ The framework is configured through three user-supplied files (templates ship as
    `langchain`, `langchain-anthropic`, `langchain-google-genai`, `langchain-google-vertexai`,
    `langgraph`, `langmem`, `playwright`, `python-dotenv`, `pyyaml`, `pillow`,
    `langchain-mcp-adapters`, `langgraph-checkpoint-sqlite`, `aiosqlite`, `httpx`.
+   Use Python 3.11–3.12 (3.14 cannot build `pyarrow`, pulled in by
+   `langchain-google-vertexai`). For a reproducible install use
+   `uv pip install -r requirements.txt && uv pip install -e . --no-deps`; regenerate that
+   lock with `uv pip compile pyproject.toml -o requirements.txt --python-version 3.11`
+   whenever `pyproject.toml` changes (CI verifies it stays installable). `mcp` is capped
+   at `<2` because `langchain-mcp-adapters` 0.2.x breaks with `mcp` 2.x.
+   Developer extras: `uv pip install -e ".[dev]"` (pytest).
 2. **Install browser**: Run `playwright install chromium`.
 3. **Configure**: Copy `.env.example` → `.env`, `config.yaml.example` → `config.yaml`, and
    (optionally) `mcp_servers.json.example` → `mcp_servers.json`. Fill in your app's URL,

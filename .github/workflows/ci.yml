@@ -23,9 +23,11 @@ jobs:
       - name: Create virtualenv
         run: uv venv --python ${{ matrix.python-version }} .venv
 
-      # Installs from pyproject.toml (which bounds mcp<2). requirements.txt is
-      # not used yet: it is currently unsatisfiable and is fixed in the
-      # dependency-upgrade task.
+      # Guards against the lock drifting out of sync with pyproject.toml
+      # (dependabot used to bump packages one by one and left it unsatisfiable).
+      - name: Check requirements.txt is installable
+        run: uv pip install --dry-run -r requirements.txt
+
       - name: Install package with dev extras
         run: uv pip install -e ".[dev]"
 
