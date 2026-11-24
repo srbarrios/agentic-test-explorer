@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Create virtualenv
+        run: uv venv --python ${{ matrix.python-version }} .venv
+
+      # Installs from pyproject.toml (which bounds mcp<2). requirements.txt is
+      # not used yet: it is currently unsatisfiable and is fixed in the
+      # dependency-upgrade task.
+      - name: Install package with dev extras
+        run: uv pip install -e ".[dev]"
+
+      - name: Run tests
+        run: .venv/bin/python -m pytest -q
