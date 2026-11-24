@@ -1,7 +1,6 @@
 import asyncio
 import os
 import argparse
-import random
 import warnings
 import yaml
 from typing import Any
@@ -26,6 +25,8 @@ from playwright.async_api import async_playwright
 from agentic_explorer.tools.browser.engine import get_action_tape
 from agentic_explorer.config import load_app_config, load_environment
 from agentic_explorer.utils.llm import make_llm, get_model_name, get_active_provider
+from agentic_explorer.utils.messages import clip_text, message_text
+from agentic_explorer.runtime.retry import with_retry
 
 from agentic_explorer.tools.common.custom_tools import (
     get_mcp_tools,
@@ -56,15 +57,6 @@ REPORT_TRANSCRIPT_MAX_CHARS = 35_000
 REPORT_TRANSCRIPT_HEAD_CHARS = 6_000
 
 
-def _clip_for_prompt(text: str, max_chars: int) -> str:
-    text = text.strip()
-    if len(text) <= max_chars:
-        return text
-    if max_chars <= 24:
-        return text[:max(0, max_chars)]
-    return text[: max_chars - 24].rstrip() + " … [truncated]"
-
-
 def _bound_transcript_for_report(transcript: str) -> str:
     """Keep report context within a predictable prompt budget.
 
@@ -89,73 +81,12 @@ def _get_async_sqlite_saver() -> Any:
     return AsyncSqliteSaver
 
 
-def _log_message_summary(msg) -> None:
-    """Print a compact one-line summary of a LangChain message to the console."""
-    content = msg.content
-    if isinstance(content, list):
-        content = "".join(
-            b.get("text", "") for b in content if isinstance(b, dict) and "text" in b
-        )
-    text = str(content).strip().replace("\n", " ")
-    if len(text) > 120:
-        text = text[:117] + "..."
-
-    tool_calls = getattr(msg, "tool_calls", None)
-    if tool_calls:
-        names = ", ".join(tc["name"] for tc in tool_calls)
-        console.info(f"{msg.type}: [{names}] {text[:80]}")
-    elif text:
-        console.info(f"{msg.type}: {text}")
-
-
 def _strip_extras(msg) -> None:
     """Remove the noisy 'extras' block from list-content messages in place."""
     if isinstance(msg.content, list):
         for block in msg.content:
             if isinstance(block, dict) and "extras" in block:
                 del block["extras"]
-
-
-def _message_text(msg) -> str:
-    """Flatten BaseMessage.content (list-of-blocks or str) to plain text."""
-    content = msg.content
-    if isinstance(content, list):
-        return "".join(b.get("text", "") for b in content if isinstance(b, dict) and "text" in b)
-    return str(content)
-
-
-def _summarize_tool_args(tool_call: dict, max_chars: int = 80) -> str:
-    """Return a compact one-line summary of a tool_call args dict."""
-    import json
-    args = tool_call.get("args") or {}
-    if not isinstance(args, dict):
-        text = str(args)
-    elif "action" in args:
-        # execute_browser_command JSON-intent shape — surface action+key fields cleanly.
-        parts = [f"action={args['action']}"]
-        for key in ("selector", "url", "value", "key"):
-            if args.get(key):
-                val = str(args[key])
-                if len(val) > 40:
-                    val = val[:37] + "..."
-                parts.append(f"{key}={val!r}")
-        text = " ".join(parts)
-    else:
-        try:
-            text = json.dumps(args, ensure_ascii=False, default=str)
-        except Exception:
-            text = str(args)
-    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
-
-
-def _is_transient_error(exc: Exception) -> bool:
-    msg = str(exc).upper()
-    return any(x in msg for x in ("503", "UNAVAILABLE", "429", "RATE_LIMIT", "RESOURCE_EXHAUSTED", "QUOTA"))
-
-
-def _is_rate_limit(exc: Exception) -> bool:
-    msg = str(exc).upper()
-    return any(x in msg for x in ("429", "RATE_LIMIT", "RESOURCE_EXHAUSTED", "QUOTA"))
 
 
 async def run_missions():
@@ -505,116 +436,101 @@ async def run_missions():
                     "explored_paths": [],
                 }
 
-            max_retries = 5
-            base_delay = 2
+            async def _stream_mission() -> None:
+                seen_message_ids: set[str] = set()
+                trace_path = f"report_{thread_id}/traces.log"
+                current_node: str | None = None
 
-            for attempt in range(max_retries):
-                try:
-                    seen_message_ids: set[str] = set()
-                    trace_path = f"report_{thread_id}/traces.log"
-                    current_node: str | None = None
+                async for mode, payload in app.astream(
+                    initial_state,
+                    config=run_config,
+                    stream_mode=["updates", "messages"],
+                ):
+                    if mode == "updates":
+                        # payload: {node_name: state_update}
+                        for node_name, state_update in payload.items():
+                            if current_node is not None:
+                                console.state_update_end()
+                            current_node = node_name
+                            console.state_update(node_name)
 
-                    async for mode, payload in app.astream(
-                        initial_state,
-                        config=run_config,
-                        stream_mode=["updates", "messages"],
-                    ):
-                        if mode == "updates":
-                            # payload: {node_name: state_update}
-                            for node_name, state_update in payload.items():
-                                if current_node is not None:
-                                    console.state_update_end()
-                                current_node = node_name
-                                console.state_update(node_name)
-
-                                if args.visual:
-                                    from agentic_explorer.ui import state_emitter
-                                    active = state_update.get("next_agent", node_name) if node_name == "Supervisor" else node_name
-                                    update_dict = {"active_node": active}
-                                    if "step_count" in state_update:
-                                        update_dict["step_count"] = state_update["step_count"]
-                                    state_emitter.update(**update_dict)
-                                    # bugs_found and explored_paths arrive as per-node DELTAS
-                                    # (operator.add reducer in AgentState); accumulate them
-                                    # rather than overwrite so the cumulative count is preserved.
-                                    if "bugs_found" in state_update:
-                                        state_emitter.add_bugs(state_update["bugs_found"])
-                                    if "explored_paths" in state_update:
-                                        state_emitter.add_paths(state_update["explored_paths"])
-                                    state_emitter.emit()
-
-                                if "messages" in state_update and state_update["messages"]:
-                                    messages = state_update["messages"] if isinstance(state_update["messages"], list) else [state_update["messages"]]
-                                    with open(trace_path, "a", encoding="utf-8") as trace_file:
-                                        trace_file.write(f"\nSTATE UPDATE FROM: {node_name}\n")
-                                        for msg in messages:
-                                            _strip_extras(msg)
-                                            msg_id = getattr(msg, "id", None)
-                                            if msg_id and msg_id in seen_message_ids:
-                                                continue
-                                            if msg_id:
-                                                seen_message_ids.add(msg_id)
-                                            trace_file.write(msg.pretty_repr() + "\n")
-
-                        elif mode == "messages":
-                            msg, meta = payload
-                            node_name = meta.get("langgraph_node") or current_node or "?"
-
-                            # Skip mid-stream chunks — wait for the final assembled message.
-                            if isinstance(msg, AIMessageChunk):
-                                continue
-                            # Skip system prompt messages — they are static boilerplate.
-                            if isinstance(msg, SystemMessage):
-                                continue
-
-                            msg_id = getattr(msg, "id", None)
-                            if msg_id and msg_id in seen_message_ids:
-                                continue
-                            if msg_id:
-                                seen_message_ids.add(msg_id)
-
-                            _strip_extras(msg)
-
-                            # Console: ReAct lines (compact when --quiet).
-                            _max = 120 if args.quiet else 500
-                            if isinstance(msg, AIMessage):
-                                text = _message_text(msg)
-                                if text.strip():
-                                    console.react_thought(node_name, text, max_chars=_max)
-                            elif isinstance(msg, HumanMessage):
-                                text = _message_text(msg)
-                                if text.strip():
-                                    console.info(f"HUMAN: {text[:120]}")
-
-                            if args.visual and isinstance(msg, AIMessage):
+                            if args.visual:
                                 from agentic_explorer.ui import state_emitter
-                                state_emitter.append_thought(node_name, _message_text(msg))
+                                active = state_update.get("next_agent", node_name) if node_name == "Supervisor" else node_name
+                                update_dict = {"active_node": active}
+                                if "step_count" in state_update:
+                                    update_dict["step_count"] = state_update["step_count"]
+                                state_emitter.update(**update_dict)
+                                # bugs_found and explored_paths arrive as per-node DELTAS
+                                # (operator.add reducer in AgentState); accumulate them
+                                # rather than overwrite so the cumulative count is preserved.
+                                if "bugs_found" in state_update:
+                                    state_emitter.add_bugs(state_update["bugs_found"])
+                                if "explored_paths" in state_update:
+                                    state_emitter.add_paths(state_update["explored_paths"])
                                 state_emitter.emit()
 
-                            # Trace file: full pretty_repr for every message (regardless of --quiet).
-                            with open(trace_path, "a", encoding="utf-8") as trace_file:
-                                trace_file.write(f"\n[{node_name}] {msg.__class__.__name__}\n")
-                                trace_file.write(msg.pretty_repr() + "\n")
+                            if "messages" in state_update and state_update["messages"]:
+                                messages = state_update["messages"] if isinstance(state_update["messages"], list) else [state_update["messages"]]
+                                with open(trace_path, "a", encoding="utf-8") as trace_file:
+                                    trace_file.write(f"\nSTATE UPDATE FROM: {node_name}\n")
+                                    for msg in messages:
+                                        _strip_extras(msg)
+                                        msg_id = getattr(msg, "id", None)
+                                        if msg_id and msg_id in seen_message_ids:
+                                            continue
+                                        if msg_id:
+                                            seen_message_ids.add(msg_id)
+                                        trace_file.write(msg.pretty_repr() + "\n")
 
-                    if current_node is not None:
-                        console.state_update_end()
-                    break
-                except Exception as e:
-                    if _is_transient_error(e):
-                        if attempt < max_retries - 1:
-                            if _is_rate_limit(e):
-                                delay = 30 + (attempt * 15) + random.randint(0, 10)
-                                console.warn(f"Rate limit hit: {str(e)[:120]}")
-                            else:
-                                delay = base_delay * (2 ** attempt)
-                            console.retry(attempt + 1, max_retries, delay)
-                            await asyncio.sleep(delay)
-                            initial_state = None  # resume from checkpoint
-                        else:
-                            console.fail(f"Failed after {max_retries} attempts.")
-                            raise
-                    else:
-                        raise
+                    elif mode == "messages":
+                        msg, meta = payload
+                        node_name = meta.get("langgraph_node") or current_node or "?"
+
+                        # Skip mid-stream chunks — wait for the final assembled message.
+                        if isinstance(msg, AIMessageChunk):
+                            continue
+                        # Skip system prompt messages — they are static boilerplate.
+                        if isinstance(msg, SystemMessage):
+                            continue
+
+                        msg_id = getattr(msg, "id", None)
+                        if msg_id and msg_id in seen_message_ids:
+                            continue
+                        if msg_id:
+                            seen_message_ids.add(msg_id)
+
+                        _strip_extras(msg)
+
+                        # Console: ReAct lines (compact when --quiet).
+                        _max = 120 if args.quiet else 500
+                        if isinstance(msg, AIMessage):
+                            text = message_text(msg)
+                            if text.strip():
+                                console.react_thought(node_name, text, max_chars=_max)
+                        elif isinstance(msg, HumanMessage):
+                            text = message_text(msg)
+                            if text.strip():
+                                console.info(f"HUMAN: {text[:120]}")
+
+                        if args.visual and isinstance(msg, AIMessage):
+                            from agentic_explorer.ui import state_emitter
+                            state_emitter.append_thought(node_name, message_text(msg))
+                            state_emitter.emit()
+
+                        # Trace file: full pretty_repr for every message (regardless of --quiet).
+                        with open(trace_path, "a", encoding="utf-8") as trace_file:
+                            trace_file.write(f"\n[{node_name}] {msg.__class__.__name__}\n")
+                            trace_file.write(msg.pretty_repr() + "\n")
+
+                if current_node is not None:
+                    console.state_update_end()
+
+            def _resume_from_checkpoint(_attempt: int, _exc: Exception) -> None:
+                nonlocal initial_state
+                initial_state = None  # retries resume from the saved checkpoint
+
+            await with_retry(_stream_mission, on_retry=_resume_from_checkpoint)
 
             console.step(f"Generating report for {thread_id}...")
             final_state = await app.aget_state(run_config)
@@ -623,15 +539,11 @@ async def run_missions():
 
             transcript_lines = []
             for msg in mission_history:
-                text_content = (
-                    "".join([b.get("text", "") for b in msg.content if isinstance(b, dict) and "text" in b])
-                    if isinstance(msg.content, list)
-                    else str(msg.content)
-                )
+                text_content = message_text(msg)
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     text_content += f" [Action: {', '.join(tc['name'] for tc in msg.tool_calls)}]"
                 if text_content.strip():
-                    transcript_lines.append(f"{msg.type.upper()}: {_clip_for_prompt(text_content, 2_000)}")
+                    transcript_lines.append(f"{msg.type.upper()}: {clip_text(text_content, 2_000)}")
 
             clean_transcript = _bound_transcript_for_report("\n".join(transcript_lines))
 
@@ -660,25 +572,10 @@ async def run_missions():
                 "Output ONLY plain Markdown text."
             ))
 
-            for attempt in range(max_retries):
-                try:
-                    report_response = await report_llm.ainvoke([report_instruction])
-                    break
-                except Exception as e:
-                    if _is_transient_error(e):
-                        if attempt < max_retries - 1:
-                            if _is_rate_limit(e):
-                                delay = 30 + (attempt * 15) + random.randint(0, 10)
-                                console.warn(f"Rate limit hit: {str(e)[:120]}")
-                            else:
-                                delay = base_delay * (2 ** attempt)
-                            console.retry(attempt + 1, max_retries, delay)
-                            await asyncio.sleep(delay)
-                        else:
-                            console.fail(f"Report generation failed after {max_retries} attempts.")
-                            raise
-                    else:
-                        raise
+            report_response = await with_retry(
+                lambda: report_llm.ainvoke([report_instruction]),
+                fail_message="Report generation failed after {max_attempts} attempts.",
+            )
 
             clean_report_text = report_response.content
             if isinstance(clean_report_text, list):

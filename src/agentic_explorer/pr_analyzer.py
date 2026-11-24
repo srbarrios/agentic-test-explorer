@@ -28,6 +28,7 @@ import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agentic_explorer.config import AppMeta
+from agentic_explorer.runtime.retry import is_transient_error
 from agentic_explorer.utils import console
 from agentic_explorer.utils.llm import make_llm
 from agentic_explorer.utils.llm_json import extract_yaml_text
@@ -525,11 +526,6 @@ def _validate_missions(data: Any, pr_number: int) -> dict:
     return data
 
 
-def _is_transient_error(exc: Exception) -> bool:
-    msg = str(exc).upper()
-    return any(x in msg for x in ("503", "UNAVAILABLE", "429", "RATE_LIMIT", "RESOURCE_EXHAUSTED", "QUOTA"))
-
-
 async def generate_missions_from_pr(pr_data: PRData, app: AppMeta, store=None) -> dict:
     """Use an LLM to generate targeted test missions from PR data.
 
@@ -584,7 +580,7 @@ async def generate_missions_from_pr(pr_data: PRData, app: AppMeta, store=None) -
                     "      Detailed test instructions...\n"
                 ))
         except Exception as e:
-            if _is_transient_error(e) and attempt < max_retries - 1:
+            if is_transient_error(e) and attempt < max_retries - 1:
                 delay = base_delay * (2 ** attempt)
                 console.retry(attempt + 1, max_retries, delay)
                 await asyncio.sleep(delay)
