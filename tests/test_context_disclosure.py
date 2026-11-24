@@ -4,7 +4,6 @@ from typing import cast
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agentic_explorer.config import AppMeta
-from agentic_explorer.main import _bound_transcript_for_report, REPORT_TRANSCRIPT_MAX_CHARS
 from agentic_explorer.orchestration.graph_base import AgentState, _build_routing_context, _sanitize_messages_for_model
 from agentic_explorer.pr_analyzer import (
     PRData,
@@ -13,6 +12,7 @@ from agentic_explorer.pr_analyzer import (
     _build_human_message,
     _validate_missions,
 )
+from agentic_explorer.reporting import REPORT_TRANSCRIPT_MAX_CHARS, bound_transcript
 
 
 class ContextDisclosureTests(unittest.TestCase):
@@ -46,11 +46,11 @@ class ContextDisclosureTests(unittest.TestCase):
 
     def test_report_transcript_at_limit_is_unchanged(self):
         transcript = "x" * REPORT_TRANSCRIPT_MAX_CHARS
-        self.assertEqual(_bound_transcript_for_report(transcript), transcript)
+        self.assertEqual(bound_transcript(transcript), transcript)
 
     def test_report_transcript_is_bounded(self):
         transcript = "start\n" + ("middle\n" * 10_000) + "end"
-        bounded = _bound_transcript_for_report(transcript)
+        bounded = bound_transcript(transcript)
         self.assertLessEqual(len(bounded), REPORT_TRANSCRIPT_MAX_CHARS)
         self.assertIn("start", bounded)
         self.assertIn("end", bounded)
