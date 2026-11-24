@@ -7,7 +7,7 @@ ADVANCED_KEYWORDS)``. The substring match is a known footgun (see the
 
 import pytest
 
-from agentic_explorer.main import ADVANCED_KEYWORDS
+from agentic_explorer.orchestration.personas import ADVANCED_KEYWORDS
 
 
 def _is_advanced(thread_id: str) -> bool:

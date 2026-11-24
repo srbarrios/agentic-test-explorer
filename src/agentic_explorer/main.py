@@ -19,8 +19,8 @@ from playwright.async_api import async_playwright  # noqa: E402
 from agentic_explorer.cli import parse_args  # noqa: E402
 from agentic_explorer.config import AppConfig, load_app_config, load_environment  # noqa: E402
 from agentic_explorer.memory_admin import DEFAULT_DB  # noqa: E402
-from agentic_explorer.orchestration.advanced_graph import build_advanced_graph  # noqa: E402
-from agentic_explorer.orchestration.standard_graph import build_graph  # noqa: E402
+from agentic_explorer.orchestration.graph import build_graph  # noqa: E402
+from agentic_explorer.orchestration.personas import resolve_tier  # noqa: E402
 from agentic_explorer.runtime.missions import resolve_missions  # noqa: E402
 from agentic_explorer.runtime.runner import run_mission  # noqa: E402
 from agentic_explorer.tools.common.custom_tools import (  # noqa: E402
@@ -32,30 +32,11 @@ from agentic_explorer.utils.llm import get_active_provider, get_model_name, make
 
 load_environment()
 
-# Mission-type detection: thread_ids matching these substrings are routed to the
-# advanced graph instead of the standard 3-persona swarm.
-ADVANCED_KEYWORDS = (
-    "accessibility",
-    "a11y",
-    "data_heavy",
-    "data-heavy",
-    "impatient",
-    "returning",
-    "explorer",
-    "chaos",
-    "autonomous",
-)
-
-
 def _get_async_sqlite_saver() -> Any:
     """Import AsyncSqliteSaver while suppressing a known upstream pending warning."""
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
     return AsyncSqliteSaver
-
-
-def _is_advanced(thread_id: str) -> bool:
-    return any(kw in thread_id.lower() for kw in ADVANCED_KEYWORDS)
 
 
 def _configure_llm(cfg: AppConfig, provider: Optional[str]):
@@ -105,6 +86,9 @@ async def run_missions():
     if missions is None:
         return
 
+    # Decide every mission's graph up front so an invalid `graph:` fails before any browser starts.
+    tiers = [resolve_tier(mission) for mission in missions]
+
     mission_cooldown = int(os.getenv("MISSION_COOLDOWN", "5"))
 
     console.section("Setup")
@@ -153,16 +137,20 @@ async def run_missions():
         base_tools = doc_tools + skill_tools
 
         console.step("Compiling LangGraph swarms...")
-        standard_app = await build_graph(base_tools, active_page, memory_saver, cfg.app, max_steps=cli.max_steps, quiet=cli.quiet, store=memory_store)
-        advanced_app = await build_advanced_graph(base_tools, active_page, memory_saver, cfg.app, max_steps=cli.max_steps, quiet=cli.quiet, store=memory_store)
+        graphs = {
+            tier: await build_graph(
+                base_tools, active_page, memory_saver, cfg.app,
+                tier=tier, max_steps=cli.max_steps, quiet=cli.quiet, store=memory_store,
+            )
+            for tier in ("standard", "advanced")
+        }
         console.success("Ready")
 
-        for mission in missions:
-            advanced = _is_advanced(str(mission["thread_id"]))
+        for mission, tier in zip(missions, tiers):
             await run_mission(
-                advanced_app if advanced else standard_app,
+                graphs[tier],
                 mission,
-                mission_type="ADVANCED" if advanced else "STANDARD",
+                mission_type=tier.upper(),
                 app_url=cfg.app.url,
                 store=memory_store,
                 quiet=cli.quiet,

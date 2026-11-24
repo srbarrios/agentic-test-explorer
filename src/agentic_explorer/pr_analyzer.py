@@ -28,6 +28,7 @@ import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agentic_explorer.config import AppMeta
+from agentic_explorer.orchestration.personas import ALL_KEYWORDS, tier_for_thread_id
 from agentic_explorer.runtime.retry import is_transient_error
 from agentic_explorer.utils import console
 from agentic_explorer.utils.llm import make_llm
@@ -41,24 +42,8 @@ PR_PROMPT_BODY_BUDGET_CHARS = int(os.getenv("PR_PROMPT_BODY_BUDGET_CHARS", "8000
 PR_PROMPT_FILE_LIST_LIMIT = int(os.getenv("PR_PROMPT_FILE_LIST_LIMIT", "80"))
 PR_GENERATED_MISSION_PROMPT_MAX_CHARS = int(os.getenv("PR_GENERATED_MISSION_PROMPT_MAX_CHARS", "1200"))
 
-_ALLOWED_PR_AGENT_KEYWORDS = (
-    "new_user",
-    "power_user",
-    "adversarial_user",
-    "accessibility_user",
-    "accessibility",
-    "a11y",
-    "data_heavy_user",
-    "data_heavy",
-    "data-heavy",
-    "impatient_user",
-    "impatient",
-    "returning_user",
-    "returning",
-    "explorer",
-    "chaos",
-    "autonomous",
-)
+# Thread-id substrings that name a known persona; derived from the persona registry.
+_ALLOWED_PR_AGENT_KEYWORDS = ALL_KEYWORDS
 _DELETED_PR_AGENT_KEYWORDS = (
     "listing",
     "graph",
@@ -523,6 +508,9 @@ def _validate_missions(data: Any, pr_number: int) -> dict:
             raise ValueError(f"Mission {i} uses a deleted agent in thread_id: {m['thread_id']}")
         if not any(keyword in thread_id for keyword in _ALLOWED_PR_AGENT_KEYWORDS):
             raise ValueError(f"Mission {i} does not target an allowed agent: {m['thread_id']}")
+        # Generated missions state their graph explicitly instead of relying on the
+        # deprecated thread-id keyword inference.
+        m["graph"] = tier_for_thread_id(m["thread_id"])
     return data
 
 

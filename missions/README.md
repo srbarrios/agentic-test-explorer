@@ -7,10 +7,19 @@ contains a `missions:` list; each entry is a single isolated test run.
 
 ```yaml
 missions:
-  - thread_id: "<unique_id>"   # required — also routes to a graph (see below)
+  - thread_id: "<unique_id>"   # required — unique per run
+    graph: standard            # required in practice — "standard" or "advanced" (see below)
     prompt: >                  # required — natural-language instructions for the agent
       <multi-line text>
 ```
+
+### `graph`
+
+* `standard` runs the 3-persona swarm (`new_user_agent`, `power_user_agent`,
+  `adversarial_user_agent`); `advanced` runs the deep personas plus `explorer_agent`.
+* Missions generated from a PR (`--pr-url`) and the files in this folder already set it.
+* If it is omitted the graph is inferred from the `thread_id` (see *Routing keywords*
+  below), which is **deprecated** and prints a warning for each such mission.
 
 ### `thread_id`
 
@@ -19,10 +28,12 @@ missions:
 * Reusing the same `thread_id` resumes the prior conversation. Pass `--clear-checkpoints`
   to reset checkpoints while keeping learned memory, `--clear-learned` for the inverse,
   or `--clear-all` to wipe everything.
-* **Routing keywords**: if `thread_id` contains any of `accessibility`, `a11y`,
-  `data_heavy`, `data-heavy`, `impatient`, `returning`, `explorer`, `chaos`, or
-  `autonomous`, the mission is dispatched to the **advanced** graph. Otherwise it
-  runs on the **standard** 3-persona swarm.
+* **Routing keywords (deprecated fallback, only when `graph:` is missing)**: if
+  `thread_id` contains any of `accessibility`, `a11y`, `data_heavy`, `data-heavy`,
+  `impatient`, `returning`, `explorer`, `chaos`, or `autonomous`, the mission is
+  dispatched to the **advanced** graph. Otherwise it runs on the **standard** 3-persona
+  swarm. The match is a plain substring, so `new_user_explorer_notes` goes to the advanced
+  graph; set `graph:` explicitly to avoid surprises.
 
 ### `prompt`
 
@@ -59,8 +70,8 @@ missions:
 1. Pick a `thread_id` that signals the persona or area under test (e.g. `smoke_new_user_01`).
 2. Write a concise prompt that tells the agent **what to do** and **what to verify**, not how.
 3. Reference the persona or risk area the supervisor should route to.
-4. If the test should run on an advanced agent, include one of the advanced routing keywords
-   in the `thread_id`; for autonomous exploration, use `explorer`, `chaos`, or `autonomous`.
+4. Set `graph: advanced` if the test targets an advanced agent (for autonomous exploration,
+   mention the explorer in the prompt), otherwise `graph: standard`.
 
 Each supported agent has a generic mission template named `<agent>.yaml` in this folder to help you get started.
 
