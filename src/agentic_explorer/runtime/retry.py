@@ -14,7 +14,9 @@ from agentic_explorer.utils import console
 
 T = TypeVar("T")
 
-_TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RATE_LIMIT", "RESOURCE_EXHAUSTED", "QUOTA")
+# 529 / "overloaded_error" is Anthropic's temporary-overload response: retry with the
+# normal exponential backoff (it is not a quota, so no long rate-limit wait).
+_TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RATE_LIMIT", "RESOURCE_EXHAUSTED", "QUOTA", "529", "OVERLOADED")
 _RATE_LIMIT_MARKERS = ("429", "RATE_LIMIT", "RESOURCE_EXHAUSTED", "QUOTA")
 
 

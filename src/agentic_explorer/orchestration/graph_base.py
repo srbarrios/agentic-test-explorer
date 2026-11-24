@@ -393,6 +393,7 @@ def make_agent_node(agent, *, name: str = "agent", quiet: bool = False, app_url_
             filtered_state["messages"] = _sanitize_messages_for_model(
                 filtered_state["messages"]
             )
+        n_input = len(filtered_state.get("messages", []))
 
         out: dict = {}
         seen_count = 0
@@ -408,7 +409,10 @@ def make_agent_node(agent, *, name: str = "agent", quiet: bool = False, app_url_
                         state_emitter.emit()
             seen_count = len(messages)
 
-        new_messages: Sequence[BaseMessage] = out.get("messages", [])
+        # The compiled agent streams its whole state: the (sanitized) input comes back
+        # first, then what the agent produced. Only the latter is new; returning all of
+        # it re-added the history and re-counted every earlier bug on each turn.
+        new_messages: Sequence[BaseMessage] = list(out.get("messages", []))[n_input:]
         new_tape = list(get_action_tape(thread_id)[before:])
 
         if store and app_url_hash and new_tape:
@@ -573,17 +577,16 @@ def make_summarizer_node(*, keep_recent: int = _SUMMARIZER_KEEP_RECENT):
             + "\n".join(f"  {line}" for line in compact_lines)
         )
 
-        removals = [
-            RemoveMessage(id=msg.id)
-            for msg in old_messages
-            if getattr(msg, "id", None)
-        ]
-        if not removals:
+        # The summary takes the id of the first old message that can be addressed, so
+        # add_messages replaces that message in place and the summary keeps its
+        # chronological spot (after the mission prompt, before the recent messages).
+        # The remaining old messages are removed.
+        removable = [msg for msg in old_messages if getattr(msg, "id", None)]
+        if not removable:
             return {}
 
-        return {
-            "messages": removals + [HumanMessage(content=summary_text)],
-        }
+        summary = HumanMessage(content=summary_text, id=removable[0].id)
+        return {"messages": [summary, *(RemoveMessage(id=msg.id) for msg in removable[1:])]}
 
     return summarizer_node
 

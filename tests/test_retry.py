@@ -55,6 +55,8 @@ def _sleeper():
 @pytest.mark.parametrize("message", [
     "503 Service Unavailable", "UNAVAILABLE", "Error 429", "rate_limit_error",
     "RESOURCE_EXHAUSTED: quota", "quota exceeded",
+    "Error code: 529 - {'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'Overloaded'}}",
+    "anthropic is overloaded",
 ])
 def test_transient_errors(message):
     assert is_transient_error(Exception(message)) is True
@@ -71,6 +73,7 @@ def test_non_transient_errors(message):
     ("RESOURCE_EXHAUSTED", True),
     ("quota exceeded", True),
     ("503 Service Unavailable", False),  # transient, but not a rate limit
+    ("Error code: 529 - overloaded_error", False),  # overload: back off, but not the long quota wait
 ])
 def test_rate_limit_errors(message, expected):
     assert is_rate_limit(Exception(message)) is expected
