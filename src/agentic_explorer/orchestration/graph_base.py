@@ -15,6 +15,7 @@ import re
 from typing import Annotated, Any, Dict, List, Sequence, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
+from langgraph.graph.message import add_messages
 
 from agentic_explorer.tools.browser.engine import get_action_tape
 from agentic_explorer.utils import console
@@ -68,7 +69,9 @@ def _bounded_tape_reducer(old: List[Dict[str, Any]], new: List[Dict[str, Any]]) 
 
 
 class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], operator.add]
+    # add_messages (not operator.add) so RemoveMessage from the Summarizer node
+    # actually deletes history and messages with the same id are replaced.
+    messages: Annotated[Sequence[BaseMessage], add_messages]
     next_agent: str
     # Recent browser commands kept in state (capped); full log persisted to JSONL.
     action_tape: Annotated[List[Dict[str, Any]], _bounded_tape_reducer]

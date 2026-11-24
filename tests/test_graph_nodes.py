@@ -4,12 +4,15 @@ These pin the behaviour that existed before the LangGraph 1.2 refactor so the
 upcoming changes cannot alter it silently.
 """
 
-import pytest
+from langchain.agents import create_agent
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 
 from agentic_explorer.orchestration.graph_base import (
     AgentState,
+    make_agent_node,
     make_summarizer_node,
     make_supervisor_node,
 )
@@ -67,24 +70,48 @@ async def test_summarizer_keeps_mission_prompt_and_last_20():
     assert summary.content.startswith("PREVIOUS PROGRESS SUMMARY (39 messages compacted):")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known bug: AgentState.messages uses operator.add, so the RemoveMessage "
-        "entries are appended instead of deleting history (60 -> 100 messages). "
-        "Fixing it needs the add_messages reducer; this test will then XPASS "
-        "and strict mode forces removing this marker."
-    ),
-)
 async def test_summarizer_actually_shrinks_state_through_agent_state_reducer():
+    # Regression: with operator.add the RemoveMessage entries were appended
+    # instead of deleting history (60 -> 100 messages).
     graph = StateGraph(AgentState)
     graph.add_node("Summarizer", make_summarizer_node(keep_recent=20))
     graph.set_entry_point("Summarizer")
     graph.add_edge("Summarizer", END)
 
     out = await graph.compile().ainvoke(_state(messages=_history(60)))
+    messages = out["messages"]
 
-    assert len(out["messages"]) <= 22  # mission + summary + 20 recent
+    assert len(messages) == 22  # mission + 20 recent + 1 summary
+    assert not any(isinstance(m, RemoveMessage) for m in messages)
+    assert messages[0].id == "m0"  # mission prompt survives
+    assert [m.id for m in messages[1:21]] == [f"m{i}" for i in range(40, 60)]
+    assert messages[-1].content.startswith("PREVIOUS PROGRESS SUMMARY (39 messages compacted):")
+
+
+async def test_agent_summarizer_loop_keeps_history_bounded():
+    # Regression: with operator.add this loop grew to >6000 messages in 16 steps
+    # (each agent turn re-emits the inner history and nothing was ever removed).
+    llm = GenericFakeChatModel(messages=iter(AIMessage(content=f"reply {i}") for i in range(200)))
+    agent = create_agent(llm, tools=[], system_prompt="x")
+
+    graph = StateGraph(AgentState)
+    graph.add_node("agent", make_agent_node(agent, name="agent", quiet=True))
+    graph.add_node("Summarizer", make_summarizer_node())
+    graph.set_entry_point("agent")
+    graph.add_edge("agent", "Summarizer")
+    graph.add_edge("Summarizer", "agent")
+
+    sizes = []
+    try:
+        async for values in graph.compile().astream(
+            _state(), config={"recursion_limit": 24}, stream_mode="values"
+        ):
+            sizes.append(len(values["messages"]))
+    except GraphRecursionError:
+        pass  # the loop is intentionally unbounded; we only sample 24 supersteps
+
+    assert len(sizes) >= 20
+    assert max(sizes) <= 50, sizes
 
 
 # ---------------------------------------------------------------- Supervisor
