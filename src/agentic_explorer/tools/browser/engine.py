@@ -504,6 +504,16 @@ def get_browser_command_tool(page: Page):
                 pass  # the element is gone or the page cannot say: keep the selector-based decision
         safe_params = redact_params(action, params, element_is_password=element_is_password)
 
+        # The tape records what the page did, not only what was meant: read the field back after a
+        # fill. Only whether it matches is kept, never the value, so nothing sensitive is stored.
+        effect: Optional[Dict[str, bool]] = None
+        if action == "fill" and err is None:
+            try:
+                actual = await page.input_value(params["selector"])
+                effect = {"value_matches": actual == str(params.get("value", ""))}
+            except Exception:
+                pass  # not a text field, or the page cannot say: no effect recorded
+
         snap = await extract_dom_snapshot(page)
         duration_ms = int((time.time() - started) * 1000)
         result = ExecutionResult(
@@ -524,6 +534,8 @@ def get_browser_command_tool(page: Page):
         )
         if session_lost:
             entry["auth_required"] = True
+        if effect is not None:
+            entry["effect"] = effect
         _append_tape(thread_id, entry)
         if session_lost:
             session.request_stop()
@@ -547,6 +559,11 @@ def get_browser_command_tool(page: Page):
             body.append(session.AUTH_REQUIRED_MESSAGE)
         elif result.ok:
             body.append(f"RESULT: {res}")
+            if effect is not None and not effect["value_matches"]:
+                body.append(
+                    "EFFECT: the field did not keep the typed value (the page may have reset, masked or "
+                    "rewritten it); check it before relying on this step."
+                )
         else:
             body.append(f"ERROR: {err}  (Recoverable — try a different selector or action.)")
         body.append("DOM_SNAPSHOT:")

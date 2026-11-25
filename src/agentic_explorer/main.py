@@ -72,7 +72,13 @@ def _configure_llm(cfg: AppConfig, provider: Optional[str]):
 
 
 async def run_missions():
+    """Run the missions; with ``--replay``, replay a recorded tape instead and return its exit code."""
     cli = parse_args()
+    if cli.replay:
+        # Replaying a tape needs a browser, not a model: no credentials, no cost.
+        from agentic_explorer.runtime.replay import run_replay_command
+
+        return await run_replay_command(cli.replay, headed=cli.headed)
     cfg = load_app_config()
     probe_llm = _configure_llm(cfg, cli.provider)
 
@@ -196,7 +202,9 @@ async def run_missions():
 
 def main():
     try:
-        asyncio.run(run_missions())
+        exit_code = asyncio.run(run_missions())
+        if exit_code:  # only --replay returns one
+            raise SystemExit(exit_code)
     except GraphDrained as drained:
         if drained.reason == session.DRAIN_REASON:
             console.warn(

@@ -672,6 +672,16 @@ flowchart TD
     S -- passes --> D[Not reproduced: compare the app revision and the data in the header]
 ```
 
+To check that a bug really reproduces, replay its tape with no model and no credentials:
+
+```bash
+agent-explorer --replay <thread_id>   # exit 0 reproduced, 1 not reproduced, 2 setup failure, 3 diverged, 4 inconclusive
+```
+
+It re-executes `report_<thread_id>/action_tape.jsonl` in a fresh browser and writes
+`replay.json`. It runs the recorded actions against the real app, so it has the same side
+effects as the mission.
+
 If the saved session (`auth.json`) expires during a mission, the run stops cleanly with exit
 code 130 and a message instead of testing the login page: run `agent-auth`, then the same
 command to resume with the tape intact.

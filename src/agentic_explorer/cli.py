@@ -26,6 +26,7 @@ class CliArgs:
     export_model: bool
     visual: bool
     app_revision: Optional[str] = None
+    replay: Optional[str] = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Revision of the app under test (commit, version, build id), recorded in the tape header "
              "and in generated specs. Overrides APP_REVISION and app.revision in config.yaml",
     )
+    parser.add_argument(
+        "--replay", type=str, default=None, metavar="THREAD_ID",
+        help="Re-execute report_<THREAD_ID>/action_tape.jsonl in a fresh browser without any LLM and say whether "
+             "the recorded behaviour comes back (exit 0 reproduced, 1 not reproduced, 2 setup failure, "
+             "3 diverged, 4 inconclusive). Runs the recorded actions against the real app. Cannot be combined "
+             "with running missions",
+    )
     return parser
 
 
@@ -75,6 +83,10 @@ def parse_args(argv: Optional[List[str]] = None) -> CliArgs:
 
     if args.visual and importlib.util.find_spec("streamlit") is None:
         parser.error("--visual requires Streamlit. Install with: pip install agentic-test-explorer[visual]")
+    if args.replay:
+        if args.missions or args.pr_url or args.regression or args.export_model:
+            parser.error("--replay replays a recorded tape and cannot be combined with --missions, --pr-url, --regression or --export-model")
+        return args
     if not (args.missions or args.pr_url or args.regression or args.export_model):
         parser.error("At least one of --missions, --pr-url, --regression, or --export-model is required")
     return args
