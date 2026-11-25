@@ -39,6 +39,7 @@ from langchain_core.tools import tool
 from playwright.async_api import Page
 
 from agentic_explorer.tools.browser.provenance import load_provenance
+from agentic_explorer.tools.browser.snapshots import persist_snapshot
 from agentic_explorer.utils import console
 
 # ---------------------------------------------------------
@@ -475,7 +476,14 @@ def get_browser_command_tool(page: Page):
             started_at=started, duration_ms=duration_ms,
             result=res, error=err, snapshot=snap,
         )
-        _append_tape(thread_id, result.to_tape_entry())
+        # The exact view the agent is about to receive. Saved on the side and referenced
+        # from the tape, so the tape stays small and a reviewer can see what was on screen.
+        snapshot_text = _format_snapshot_for_llm(snap)
+        entry = result.to_tape_entry()
+        snapshot_ref = persist_snapshot(thread_id, snapshot_text)
+        if snapshot_ref:
+            entry["snapshot_ref"] = snapshot_ref
+        _append_tape(thread_id, entry)
 
         from agentic_explorer.ui import state_emitter
         if state_emitter.is_enabled():
@@ -497,7 +505,7 @@ def get_browser_command_tool(page: Page):
         else:
             body.append(f"ERROR: {err}  (Recoverable — try a different selector or action.)")
         body.append("DOM_SNAPSHOT:")
-        body.append(_format_snapshot_for_llm(snap))
+        body.append(snapshot_text)
         return "\n".join(body)
 
     return execute_browser_command
