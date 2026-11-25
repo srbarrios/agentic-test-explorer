@@ -27,6 +27,7 @@ from agentic_explorer.orchestration.personas import resolve_tier  # noqa: E402
 from agentic_explorer.runtime.drain import install_drain_handlers  # noqa: E402
 from agentic_explorer.runtime.missions import resolve_missions  # noqa: E402
 from agentic_explorer.runtime.runner import run_missions_batch  # noqa: E402
+from agentic_explorer.tools.browser.provenance import resolve_app_revision  # noqa: E402
 from agentic_explorer.tools.common.custom_tools import (  # noqa: E402
     fetch_agent_skill,
     get_mcp_tools,
@@ -160,6 +161,12 @@ async def run_missions():
                 graphs, missions, tiers,
                 app_url=cfg.app.url, store=memory_store, control=control,
                 quiet=cli.quiet, visual=cli.visual, cooldown_s=mission_cooldown,
+                provenance={
+                    "app_name": cfg.app.name,
+                    "app_url": cfg.app.url,
+                    "app_revision": resolve_app_revision(cli.app_revision, cfg.app.revision),
+                    "seed": cfg.app.seed,
+                },
             )
         finally:
             uninstall_drain_handlers()

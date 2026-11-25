@@ -38,6 +38,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from playwright.async_api import Page
 
+from agentic_explorer.tools.browser.provenance import load_provenance
 from agentic_explorer.utils import console
 
 # ---------------------------------------------------------
@@ -562,6 +563,70 @@ def _tape_entry_to_ts(entry: Dict[str, Any]) -> Optional[str]:
     return prefix + f"  // unsupported action replay: {a}"
 
 
+def _comment_safe(text: Any) -> str:
+    """One line, and unable to close the surrounding block comment."""
+    return " ".join(str(text).split()).replace("*/", "* /")
+
+
+def _provenance_comment(meta: Mapping[str, Any]) -> List[str]:
+    """Header lines saying which app revision, session and starting data the tape came from."""
+    auth = meta.get("auth_state") or {}
+    sha = auth.get("sha256")
+    lines = [
+        " * Provenance:",
+        f" *   App revision: {_comment_safe(meta.get('app_revision') or 'not recorded')}",
+        f" *   Session recorded: {_comment_safe(meta.get('started_at') or 'not recorded')}",
+        f" *   auth.json sha256: {sha or 'not recorded'}"
+        + (f" (modified {_comment_safe(auth.get('modified'))})" if auth.get("modified") else ""),
+    ]
+    seed = meta.get("seed") or []
+    if seed:
+        lines.append(" *   Preconditions (starting data):")
+        lines.extend(f" *     - {_comment_safe(item)}" for item in seed)
+    return lines
+
+
+_LOGIN_PATH_TS = r"/\/(log-?in|sign-?in|auth|sso)(\/|$)/i"
+
+
+def _setup_check(base_url: Optional[str], tape: List[Dict[str, Any]]) -> List[str]:
+    """Spec block that fails with ``SETUP_FAILURE`` (not a timeout) when the session is gone.
+
+    It opens the base URL with the stored session and fails if that lands on a login page
+    the recording itself never visited. The bug steps start after the ``BUG STEPS`` marker.
+    """
+    from urllib.parse import urlparse
+
+    base = base_url
+    recorded: List[str] = []
+    for entry in tape:
+        for url in ((entry.get("params") or {}).get("url") if entry.get("action") == "navigate" else None,
+                    entry.get("page_url")):
+            if url:
+                path = urlparse(str(url)).path or "/"
+                if path not in recorded:
+                    recorded.append(path)
+                base = base or str(url)
+    if not base:
+        return ["  // --- SETUP CHECK skipped: no base URL was recorded ---", "  // --- BUG STEPS ---"]
+    return [
+        "  // --- SETUP CHECK (a failure here is NOT the bug) ---",
+        f"  const _baseUrl = '{_ts_escape(base)}';",
+        f"  const _loginPath = {_LOGIN_PATH_TS};",
+        f"  const _recordedPaths: string[] = {json.dumps(recorded)};",
+        "  try {",
+        "    await page.goto(_baseUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });",
+        "  } catch (e) {",
+        "    throw new Error('SETUP_FAILURE: cannot load ' + _baseUrl + ' - ' + (e as Error).message);",
+        "  }",
+        "  const _landedPath = new URL(page.url()).pathname;",
+        "  if (_loginPath.test(_landedPath) && !_recordedPaths.includes(_landedPath)) {",
+        "    throw new Error('SETUP_FAILURE: session expired or invalid auth.json (redirected to ' + _landedPath + ')');",
+        "  }",
+        "  // --- BUG STEPS ---",
+    ]
+
+
 def generate_playwright_spec(
     thread_id: str,
     bug_summary: str,
@@ -583,17 +648,23 @@ def generate_playwright_spec(
         if line:
             steps.append(line)
 
+    meta = load_provenance(thread_id) or {}
     header = [
         "/**",
         f" * Auto-generated reproduction for bug: {bug_summary_clean}",
         f" * Mission thread_id: {thread_id}",
         f" * Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         " *",
+        *_provenance_comment(meta),
+        " *",
         " * Prerequisites:",
         " *   npm i -D @playwright/test && npx playwright install chromium",
         f" *   Place an authenticated storage state at ./{storage_state_path}",
         " * Run:",
         " *   npx playwright test " + os.path.basename(spec_path) + " --headed",
+        " * Reading a failure:",
+        " *   SETUP_FAILURE   -> the session or starting data is not the one recorded; the bug was not reached.",
+        " *   any other error -> the steps after '--- BUG STEPS ---' ran, so the failure is the reproduction.",
         " */",
         "import { test, expect } from '@playwright/test';",
         "",
@@ -604,8 +675,9 @@ def generate_playwright_spec(
     ]
     if app_url:
         header.append(f"  // App base URL recorded at capture time: {app_url}")
+    setup = _setup_check(app_url or meta.get("app_url"), tape)
     footer = ["});", ""]
-    content = "\n".join(header + steps + footer)
+    content = "\n".join(header + setup + steps + footer)
     with open(spec_path, "w", encoding="utf-8") as f:
         f.write(content)
     return os.path.abspath(spec_path)

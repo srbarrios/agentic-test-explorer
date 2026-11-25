@@ -25,6 +25,7 @@ from agentic_explorer.reporting import (
 from agentic_explorer.runtime.retry import with_retry
 from agentic_explorer.runtime.tracing import TraceWriter
 from agentic_explorer.tools.browser.engine import get_action_tape
+from agentic_explorer.tools.browser.provenance import write_provenance
 from agentic_explorer.ui import state_emitter
 from agentic_explorer.utils import console
 from agentic_explorer.utils.messages import message_text
@@ -147,6 +148,7 @@ async def run_mission(
     quiet: bool = False,
     visual: bool = False,
     control: Optional[RunControl] = None,
+    provenance: Optional[Mapping[str, Any]] = None,
     report_llm_factory: Callable[[], Any] = make_report_llm,
     sleep: Optional[Callable[[float], Awaitable[None]]] = None,
 ) -> MissionResult:
@@ -187,6 +189,9 @@ async def run_mission(
     resuming = bool(existing_state.values)
 
     os.makedirs(report_dir(thread_id), exist_ok=True)
+    if provenance is not None:
+        # Written once: a resumed mission keeps the header of its first run.
+        write_provenance(thread_id, **provenance)
     trace_path = os.path.join(report_dir(thread_id), "traces.log")
     # A resumed mission (after a stop or a crash) keeps the trace of its first half.
     with open(trace_path, "a" if resuming else "w", encoding="utf-8") as f:
@@ -258,6 +263,7 @@ async def run_missions_batch(
     control: RunControl,
     quiet: bool = False,
     visual: bool = False,
+    provenance: Optional[Mapping[str, Any]] = None,
     cooldown_s: float = 0,
     report_llm_factory: Callable[[], Any] = make_report_llm,
     sleep: Optional[Callable[[float], Awaitable[None]]] = None,
@@ -275,7 +281,7 @@ async def run_missions_batch(
         results.append(await run_mission(
             graphs[tier], mission,
             mission_type=tier.upper(), app_url=app_url, store=store,
-            quiet=quiet, visual=visual, control=control,
+            quiet=quiet, visual=visual, control=control, provenance=provenance,
             report_llm_factory=report_llm_factory, sleep=sleep,
         ))
 

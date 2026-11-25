@@ -2,6 +2,10 @@ app:
   name: "My Web Application"
   url: ${APP_URL}
   description: "Brief description of the application under test. Surfaces in agent prompts to give the agent domain context."
+  # Optional provenance, copied to report_<thread>/tape_meta.json and to the header of generated specs.
+  # revision: "v1.4.2"            # commit / version / build id. Overridden by APP_REVISION and --app-revision
+  # seed:                         # starting-data preconditions (documentation only, nothing is executed)
+  #   - "user qa@example.com exists with an empty cart"
 
 auth:
   method: form
