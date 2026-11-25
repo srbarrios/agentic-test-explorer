@@ -517,7 +517,7 @@ xxhash==3.7.0
     # via
     #   langgraph
     #   langsmith
-yarl==1.23.0
+yarl==1.25.1
     # via aiohttp
 zstandard==0.25.0
     # via langsmith
