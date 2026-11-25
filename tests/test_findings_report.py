@@ -84,3 +84,13 @@ def test_report_prompt_keeps_uncertain_out_of_the_bug_list():
     assert "NOT DETERMINED (1)" in prompt and "do not report these as confirmed bugs" in prompt
     assert build_report_prompt("t1", "transcript", CONFIRMED) == build_report_prompt("t1", "transcript", CONFIRMED, ())
     assert "NOT DETERMINED" not in build_report_prompt("t1", "transcript", CONFIRMED)
+
+
+def test_a_multiline_observed_value_stays_on_one_markdown_line():
+    record = {"bug": "Creds shown: x", "confidence": "uncertain", "observed": "Accepted usernames are:\nstandard_user\n\nPassword:\nsecret_sauce",
+              "observed_at": "div.login on\nhttps://app.test/"}
+    text = render_findings_section([], ["Creds shown: x"], [record])
+    observed_line = next(line for line in text.splitlines() if line.startswith("   - Observed:"))
+    assert "standard_user" in observed_line and "secret_sauce" in observed_line
+    assert "\nstandard_user" not in text and "\nsecret_sauce" not in text
+    assert "   - Where: div.login on ⏎ https://app.test/" in text

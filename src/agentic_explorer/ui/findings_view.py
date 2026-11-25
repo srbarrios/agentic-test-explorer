@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
-from agentic_explorer.orchestration.findings import find_evidence
+from agentic_explorer.orchestration.findings import find_evidence, one_line
 
 
 @dataclass
@@ -21,13 +21,13 @@ def bug_markdown(bug: str, evidence: Sequence[Mapping[str, str]]) -> str:
     """The bug text followed by Observed / Expected / Where, as Markdown."""
     record: Dict[str, str] = dict(find_evidence(bug, list(evidence)) or {})
     lines = [bug, ""]
-    lines.append(f"**Observed:** {record['observed']}" if record.get("observed")
+    lines.append(f"**Observed:** {one_line(record['observed'])}" if record.get("observed")
                  else "**Observed:** _no observed value recorded_")
     if record.get("expected"):
-        lines.append(f"**Expected:** {record['expected']}")
+        lines.append(f"**Expected:** {one_line(record['expected'])}")
     where = record.get("observed_at") or record.get("location")
     if where:
-        lines.append(f"**Where:** `{where}`")
+        lines.append(f"**Where:** `{one_line(where)}`")
     if record.get("severity"):
         lines.append(f"**Severity:** {record['severity']}")
     return "  \n".join(lines)

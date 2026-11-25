@@ -210,3 +210,25 @@ async def test_runner_without_provenance_writes_no_header(workdir):
 
     await _run(FakeGraph([[STEP]], final_values=FINAL))
     assert not (workdir / "report_test_new_user_01" / "tape_meta.json").exists()
+
+
+# --- a resumed mission gets its recorded steps back ---------------------------
+
+def test_the_tape_is_reloaded_from_disk_after_a_restart(workdir):
+    engine._append_tape("t1", {"ts": 1.0, "action": "navigate", "params": {"url": "https://app.example"}, "ok": True})
+    engine._append_tape("t1", {"ts": 2.0, "action": "click", "params": {"selector": "button"}, "ok": True})
+    engine._ACTION_TAPES.clear()  # a new process
+    assert [e["action"] for e in engine.get_action_tape("t1")] == ["navigate", "click"]
+    engine._append_tape("t1", {"ts": 3.0, "action": "hover", "params": {"selector": "a"}, "ok": True})
+    assert len(engine.get_action_tape("t1")) == 3
+    assert len((workdir / "report_t1" / "action_tape.jsonl").read_text().splitlines()) == 3  # not duplicated on disk
+
+
+def test_a_corrupt_tape_line_is_skipped_not_fatal(workdir):
+    (workdir / "report_t1").mkdir()
+    (workdir / "report_t1" / "action_tape.jsonl").write_text('{"action": "navigate", "ok": true}\nnot json\n\n{"action": "click", "ok": true}\n')
+    assert [e["action"] for e in engine.get_action_tape("t1")] == ["navigate", "click"]
+
+
+def test_a_new_thread_still_starts_with_an_empty_tape(workdir):
+    assert engine.get_action_tape("fresh") == []

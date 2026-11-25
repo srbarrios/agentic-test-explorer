@@ -7,7 +7,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Sequence
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
-from agentic_explorer.orchestration.findings import find_evidence
+from agentic_explorer.orchestration.findings import find_evidence, one_line
 from agentic_explorer.runtime.retry import with_retry
 from agentic_explorer.utils.llm import make_llm
 from agentic_explorer.utils.messages import clip_text, message_text
@@ -120,13 +120,13 @@ def write_report(thread_id: str, text: str) -> str:
 def _finding_lines(index: int, bug: str, record: Optional[Dict[str, str]]) -> List[str]:
     record = record or {}
     lines = [f"{index}. **{bug}**"]
-    lines.append(f"   - Observed: {record['observed']}" if record.get("observed")
+    lines.append(f"   - Observed: {one_line(record['observed'])}" if record.get("observed")
                  else "   - Observed: no observed value recorded")
     if record.get("expected"):
-        lines.append(f"   - Expected: {record['expected']}")
+        lines.append(f"   - Expected: {one_line(record['expected'])}")
     where = record.get("observed_at") or record.get("location")
     if where:
-        lines.append(f"   - Where: {where}")
+        lines.append(f"   - Where: {one_line(where)}")
     if record.get("severity"):
         lines.append(f"   - Severity: {record['severity']}")
     return lines

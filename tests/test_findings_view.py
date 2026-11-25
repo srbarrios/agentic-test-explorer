@@ -79,3 +79,8 @@ def test_split_for_display_tolerates_state_files_from_older_runs():
     view = split_findings_for_display({"bugs_found": ["Old bug here: s"]})
     assert len(view.confirmed) == 1 and view.uncertain == []
     assert split_findings_for_display({}).confirmed == []
+
+
+def test_a_multiline_observed_value_does_not_break_the_markdown():
+    record = {"bug": "Creds shown: x", "observed": "a\nb\n\nc"}
+    assert "**Observed:** a ⏎ b ⏎ c" in bug_markdown("Creds shown: x", [record])

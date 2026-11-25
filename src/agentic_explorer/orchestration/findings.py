@@ -109,6 +109,11 @@ class ExtractedFindings:
     evidence: List[Dict[str, str]] = field(default_factory=list)
 
 
+def one_line(text: str) -> str:
+    """Collapse a multi-line value onto one line so it cannot break Markdown lists."""
+    return " ⏎ ".join(part.strip() for part in str(text).splitlines() if part.strip())
+
+
 def _clean_entry(entry: str) -> str:
     return entry.strip(": ").strip()[:_MAX_ENTRY_CHARS]
 

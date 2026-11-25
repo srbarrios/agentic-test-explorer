@@ -48,8 +48,29 @@ from agentic_explorer.utils import console
 _ACTION_TAPES: Dict[str, List[Dict[str, Any]]] = {}
 
 
+def _load_tape_from_disk(thread_id: str) -> List[Dict[str, Any]]:
+    """Entries already recorded for ``thread_id`` by an earlier process (a stopped or crashed run)."""
+    entries: List[Dict[str, Any]] = []
+    try:
+        with open(f"report_{thread_id}/action_tape.jsonl", "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue  # a half-written line must not lose the rest
+                if isinstance(entry, dict) and entry.get("action"):
+                    entries.append(entry)
+    except OSError:
+        pass
+    return entries
+
+
 def get_action_tape(thread_id: str) -> List[Dict[str, Any]]:
-    return _ACTION_TAPES.setdefault(thread_id, [])
+    """The thread's tape. After a restart it is reloaded from ``action_tape.jsonl``, so a resumed
+    mission keeps the steps it recorded before it was stopped (reports, specs and counts include them)."""
+    if thread_id not in _ACTION_TAPES:
+        _ACTION_TAPES[thread_id] = _load_tape_from_disk(thread_id)
+    return _ACTION_TAPES[thread_id]
 
 
 def _tape_path(thread_id: str) -> str:
