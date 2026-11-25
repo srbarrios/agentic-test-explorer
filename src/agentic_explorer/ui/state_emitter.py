@@ -56,6 +56,10 @@ class VisualState:
     step_count: int = 0
     bugs_count: int = 0
     bugs_found: List[str] = field(default_factory=list)
+    # Findings the agent could not confirm: shown apart and never part of ``bugs_count``.
+    uncertain_findings: List[str] = field(default_factory=list)
+    # Observed / expected / where for each finding (see orchestration/findings.py).
+    bug_evidence: List[Dict[str, str]] = field(default_factory=list)
     explored_paths: List[str] = field(default_factory=list)
     last_thought: str = ""
     last_action: str = ""
@@ -115,6 +119,33 @@ def add_bugs(bugs: List[str]) -> None:
         seen.append(key)
         _state.bugs_found.append(bug)
     _state.bugs_count = len(_state.bugs_found)
+
+
+def add_uncertain(findings: List[str]) -> None:
+    """Append findings the agent could not confirm (deduplicated, and never a twin of a confirmed bug)."""
+    if not _enabled or not findings:
+        return
+    seen = [k for k in (_normalize_bug_key(b) for b in _state.bugs_found + _state.uncertain_findings) if k]
+    for finding in findings:
+        key = _normalize_bug_key(finding)
+        if not key or _is_dup_bug(key, seen):
+            continue
+        seen.append(key)
+        _state.uncertain_findings.append(finding)
+
+
+MAX_EVIDENCE_RECORDS = 200
+
+
+def add_evidence(records: List[Dict[str, str]]) -> None:
+    """Append evidence records, skipping exact repeats, keeping only the most recent ones."""
+    if not _enabled or not records:
+        return
+    for record in records:
+        if record not in _state.bug_evidence:
+            _state.bug_evidence.append(record)
+    if len(_state.bug_evidence) > MAX_EVIDENCE_RECORDS:
+        _state.bug_evidence = _state.bug_evidence[-MAX_EVIDENCE_RECORDS:]
 
 
 def add_paths(paths: List[str]) -> None:

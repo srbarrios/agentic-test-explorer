@@ -17,6 +17,7 @@ import time
 import streamlit as st
 import streamlit.components.v1 as components
 
+from agentic_explorer.ui.findings_view import split_findings_for_display
 from agentic_explorer.ui.swarm_diagram import generate_swarm_diagram
 
 STATE_FILE = ".agent_state.json"
@@ -150,12 +151,20 @@ def _main() -> None:
         st.markdown(f"**App URL:** `{state.get('app_url', 'N/A')}`")
         st.markdown(f"**Provider:** `{state.get('provider', 'N/A')}` · `{state.get('model_name', '')}`")
 
-        if state.get("bugs_found"):
+        findings = split_findings_for_display(state)
+        if findings.confirmed:
             st.divider()
             st.markdown("### 🐛 Bugs Discovered")
-            for i, bug in enumerate(state.get("bugs_found", []), 1):
+            for i, (_bug, body) in enumerate(findings.confirmed, 1):
                 with st.expander(f"Bug #{i}"):
-                    st.markdown(bug)
+                    st.markdown(body)
+        if findings.uncertain:
+            st.divider()
+            st.markdown(f"### ❓ Not determined ({len(findings.uncertain)})")
+            st.caption("The agent could not confirm these. They are not counted as bugs.")
+            for i, (_bug, body) in enumerate(findings.uncertain, 1):
+                with st.expander(f"Not determined #{i}"):
+                    st.markdown(body)
 
         st.divider()
         st.info("You can now close this window. Check the `report_*` directories for detailed test reports.")
@@ -285,15 +294,21 @@ def _main() -> None:
                 st.info("No actions recorded yet.")
 
         with bugs_tab:
-            bugs = state.get("bugs_found", [])
-            if bugs:
-                st.markdown(f"**Total Bugs Found:** {len(bugs)}")
+            findings = split_findings_for_display(state)
+            if findings.confirmed:
+                st.markdown(f"**Total Bugs Found:** {len(findings.confirmed)}")
                 st.divider()
-                for i, bug in enumerate(bugs, 1):
-                    with st.expander(f"Bug #{i}", expanded=(i == len(bugs))):
-                        st.markdown(bug)
+                for i, (_bug, body) in enumerate(findings.confirmed, 1):
+                    with st.expander(f"Bug #{i}", expanded=(i == len(findings.confirmed))):
+                        st.markdown(body)
             else:
                 st.info("No bugs found yet.")
+            if findings.uncertain:
+                st.divider()
+                st.markdown(f"**Not determined:** {len(findings.uncertain)} (not counted as bugs)")
+                for i, (_bug, body) in enumerate(findings.uncertain, 1):
+                    with st.expander(f"Not determined #{i}"):
+                        st.markdown(body)
 
         with paths_tab:
             paths = state.get("explored_paths", [])

@@ -104,6 +104,10 @@ async def stream_mission(
                     # rather than overwrite so the cumulative count is preserved.
                     if "bugs_found" in state_update:
                         state_emitter.add_bugs(state_update["bugs_found"])
+                    if "uncertain_findings" in state_update:
+                        state_emitter.add_uncertain(state_update["uncertain_findings"])
+                    if "bug_evidence" in state_update:
+                        state_emitter.add_evidence(state_update["bug_evidence"])
                     if "explored_paths" in state_update:
                         state_emitter.add_paths(state_update["explored_paths"])
                     state_emitter.emit()
@@ -177,6 +181,8 @@ async def run_mission(
             step_count=0,
             bugs_count=0,
             bugs_found=[],
+            uncertain_findings=[],
+            bug_evidence=[],
             explored_paths=[],
             last_thought="",
             last_action="",
