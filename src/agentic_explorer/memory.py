@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
 from agentic_explorer.memory_health import guarded, memory_health
+from agentic_explorer.orchestration.findings import find_evidence
 from agentic_explorer.orchestration.personas import persona_for_thread_id
 
 
@@ -279,10 +280,20 @@ async def catalog_bug(
     summary: str,
     page: str = "",
     session_id: str = "",
+    evidence: Optional[Dict[str, str]] = None,
 ) -> None:
-    """Add or increment a bug in the cross-session bug catalog."""
+    """Add or increment a bug in the cross-session bug catalog.
+
+    ``evidence`` (observed / expected / observed_at) only enriches the entry, e.g. the
+    text of regression missions; it never takes part in the fingerprint, so the same bug
+    keeps being recognised whether or not it was reported with evidence.
+    """
     ns = ("episodes", url_hash, "bugs")
     fp = _bug_fingerprint(summary, page)
+    kept_evidence = {
+        k: str(v) for k, v in (evidence or {}).items()
+        if k in ("observed", "expected", "observed_at") and v
+    }
 
     existing = await store.aget(ns, fp)
     if existing:
@@ -304,6 +315,8 @@ async def catalog_bug(
             "sessions": [session_id] if session_id else [],
             "status": "open",
         }
+    if kept_evidence:
+        data["evidence"] = kept_evidence  # the latest sighting wins
     await store.aput(ns, fp, data)
 
 
@@ -319,10 +332,12 @@ async def write_episode_memory(
     action_tape: List[Dict[str, Any]],
     bugs_found: List[str],
     explored_paths: List[str],
+    bug_evidence: Optional[Sequence[Dict[str, str]]] = None,
 ) -> None:
     """Write all episodic memories for a completed mission.
 
-    Called from main.py after report generation.
+    Called from the mission runner after report generation. ``bug_evidence`` is the
+    per-finding evidence recorded by the agent; each bug gets its own record, if any.
     """
     await write_session_summary(
         store, url_hash, thread_id,
@@ -335,7 +350,10 @@ async def write_episode_memory(
             if path:
                 page = urlparse(path).path or "/"
                 break
-        await catalog_bug(store, url_hash, bug_text, page=page, session_id=thread_id)
+        await catalog_bug(
+            store, url_hash, bug_text, page=page, session_id=thread_id,
+            evidence=find_evidence(bug_text, bug_evidence or []),
+        )
 
 
 # ---------------------------------------------------------
@@ -643,6 +661,11 @@ async def generate_regression_missions(store, url_hash: str) -> List[Dict[str, A
     for bug in open_bugs:
         page = bug.value.get("page", "/")
         summary = bug.value.get("summary", "unknown bug")[:150]
+        evidence = bug.value.get("evidence") or {}
+        if evidence.get("observed") or evidence.get("expected"):
+            seen = f"saw {evidence['observed']!r}" if evidence.get("observed") else ""
+            want = f"expected {evidence['expected']!r}" if evidence.get("expected") else ""
+            summary += f" ({'; '.join(part for part in (seen, want) if part)})"
         pages_with_bugs.setdefault(page, []).append(summary)
 
     missions: List[Dict[str, Any]] = []

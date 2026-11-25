@@ -238,6 +238,7 @@ async def run_mission(
             "episode memory write",
             lambda: write_episode_memory(
                 store, app_url_hash(app_url), thread_id, prompt, tape, bugs_found, explored_paths,
+                bug_evidence=evidence,
             ),
         )
 
