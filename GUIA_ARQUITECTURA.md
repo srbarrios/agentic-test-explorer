@@ -883,7 +883,7 @@ El Action Tape se traduce a un script ejecutable de Playwright (`generate_playwr
  */
 import { test, expect } from '@playwright/test';
 
-test.use({ storageState: 'auth.json' });
+test.use({ storageState: 'auth.json', actionTimeout: 5000, navigationTimeout: 15000 });
 
 test('reproduce: Cart total ignores discount', async ({ page }) => {
   test.setTimeout(120_000);
@@ -896,6 +896,8 @@ test('reproduce: Cart total ignores discount', async ({ page }) => {
   expect(_t).toContain('$96.00');   // el valor esperado, cuando el agente lo reporto
 });
 ```
+
+El spec usa los mismos timeouts por accion (5 s) y de navegacion (15 s) que el contexto del navegador de la grabacion (`ACTION_TIMEOUT_MS` / `NAVIGATION_TIMEOUT_MS` en `engine.py`, compartidos con `main.py`), asi que un paso que fallo rapido al grabar tambien falla rapido al reproducir, con el mensaje propio de Playwright `waiting for locator(...)`, en vez de esperar al timeout de 120 s del test. Un spec que no afirma ningun sintoma (sin valor `expected`, o sin nada leido con `extract_text`) lleva un `WARNING` en la cabecera y una anotacion `warning` en el informe de Playwright: que pase **no** significa que el bug este arreglado.
 
 Las acciones que fallaron al grabar se incluyen como **comentarios** para documentar el bug. Sin valor `expected`, el paso `extract_text` conserva la comprobacion debil de "hay texto" y el valor observado queda como comentario.
 

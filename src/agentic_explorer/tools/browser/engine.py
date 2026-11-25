@@ -42,6 +42,16 @@ from agentic_explorer.tools.browser.provenance import load_provenance
 from agentic_explorer.tools.browser.snapshots import persist_snapshot
 from agentic_explorer.utils import console
 
+# Per-action and navigation timeouts of the recording browser context (main.py sets them) and
+# of the generated spec, so a step that failed fast while recording fails just as fast on replay
+# instead of waiting for the whole-test timeout.
+ACTION_TIMEOUT_MS = 5000
+NAVIGATION_TIMEOUT_MS = 15000
+
+_NO_ASSERTION_NOTE = (
+    "This spec replays the recorded steps but asserts no symptom: passing does NOT mean the bug is fixed."
+)
+
 # ---------------------------------------------------------
 # Per-thread Action Tape store
 # ---------------------------------------------------------
@@ -698,6 +708,8 @@ def generate_playwright_spec(
     target = max(
         (i for i, e in enumerate(tape) if e.get("action") == "extract_text" and e.get("ok")), default=None,
     )
+    # A spec asserts the symptom only when a value was read and the agent said what it should be.
+    has_assertion = target is not None and bool(expected)
     steps: List[str] = []
     for i, entry in enumerate(tape):
         line = (
@@ -727,16 +739,26 @@ def generate_playwright_spec(
         f" *   Place an authenticated storage state at ./{storage_state_path}",
         " * Run:",
         " *   npx playwright test " + os.path.basename(spec_path) + " --headed",
+        *(
+            [" * WARNING: no symptom assertion. This spec replays the recorded steps; a pass does NOT",
+             " *   mean the bug is fixed. Add an expect(...) for the symptom before using it as a regression test."]
+            if not has_assertion else []
+        ),
         " * Reading a failure:",
         " *   SETUP_FAILURE   -> the session or starting data is not the one recorded; the bug was not reached.",
         " *   any other error -> the steps after '--- BUG STEPS ---' ran, so the failure is the reproduction.",
         " */",
         "import { test, expect } from '@playwright/test';",
         "",
-        f"test.use({{ storageState: '{storage_state_path}' }});",
+        f"test.use({{ storageState: '{storage_state_path}', actionTimeout: {ACTION_TIMEOUT_MS}, "
+        f"navigationTimeout: {NAVIGATION_TIMEOUT_MS} }});",
         "",
         f"test('reproduce: {_ts_escape(bug_summary_clean)}', async ({{ page }}) => {{",
         "  test.setTimeout(120_000);",
+        *(
+            [f"  test.info().annotations.push({{ type: 'warning', description: '{_NO_ASSERTION_NOTE}' }});"]
+            if not has_assertion else []
+        ),
     ]
     if app_url:
         header.append(f"  // App base URL recorded at capture time: {app_url}")

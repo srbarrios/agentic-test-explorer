@@ -649,7 +649,9 @@ For every mission, the framework generates a `report_<thread_id>/` directory con
    npx playwright test report_<thread_id>/reproduction_*.spec.ts --headed
    ```
    The header lists the app revision and the session it was recorded with, and a setup
-   check fails with `SETUP_FAILURE` (not a timeout) when the session is gone.
+   check fails with `SETUP_FAILURE` (not a timeout) when the session is gone. Steps time out
+   after 5 s, like the recording, and a spec with no symptom assertion says so: a pass does not
+   mean the bug is fixed.
 5. **`screenshots/`** — Image evidence captured on every detected bug.
 
 ### Provenance and Evidence

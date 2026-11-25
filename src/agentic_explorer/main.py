@@ -27,6 +27,7 @@ from agentic_explorer.orchestration.personas import resolve_tier  # noqa: E402
 from agentic_explorer.runtime.drain import install_drain_handlers  # noqa: E402
 from agentic_explorer.runtime.missions import resolve_missions  # noqa: E402
 from agentic_explorer.runtime.runner import run_missions_batch  # noqa: E402
+from agentic_explorer.tools.browser.engine import ACTION_TIMEOUT_MS, NAVIGATION_TIMEOUT_MS  # noqa: E402
 from agentic_explorer.tools.browser.provenance import resolve_app_revision  # noqa: E402
 from agentic_explorer.tools.common.custom_tools import (  # noqa: E402
     fetch_agent_skill,
@@ -131,8 +132,8 @@ async def run_missions():
         else:
             context = await browser.new_context(storage_state="auth.json", no_viewport=True, ignore_https_errors=True)
 
-        context.set_default_timeout(5000)
-        context.set_default_navigation_timeout(15000)
+        context.set_default_timeout(ACTION_TIMEOUT_MS)
+        context.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
 
         active_page = await context.new_page()
 
