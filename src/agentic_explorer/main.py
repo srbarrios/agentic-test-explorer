@@ -27,8 +27,8 @@ from agentic_explorer.orchestration.personas import resolve_tier  # noqa: E402
 from agentic_explorer.runtime.drain import install_drain_handlers  # noqa: E402
 from agentic_explorer.runtime.missions import resolve_missions  # noqa: E402
 from agentic_explorer.runtime.runner import run_missions_batch  # noqa: E402
-from agentic_explorer.tools.browser import session  # noqa: E402
 from agentic_explorer.tools.browser.provenance import resolve_app_revision  # noqa: E402
+from agentic_explorer.tools.browser import session  # noqa: E402
 from agentic_explorer.tools.common.custom_tools import (  # noqa: E402
     fetch_agent_skill,
     get_mcp_tools,
