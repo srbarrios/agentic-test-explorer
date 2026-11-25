@@ -5,17 +5,24 @@ events, can fail mid-stream, and serves the final state. The report LLM and the
 retry sleep are injected so nothing waits or touches the network.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langchain.agents import create_agent
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphDrained
+from langgraph.graph import StateGraph
 from langgraph.runtime import RunControl
 from langgraph.store.memory import InMemoryStore
 
 from agentic_explorer.memory import app_url_hash
+from agentic_explorer.orchestration.graph_base import AgentState, compile_swarm, make_agent_node
 from agentic_explorer.runtime import runner
 from agentic_explorer.runtime.runner import MissionResult, run_mission, run_missions_batch
+from trace_events import GOLDEN_EVENTS
 
 APP_URL = "https://app.test"
 MISSION = {"thread_id": "test_new_user_01", "prompt": "explore the cart"}
@@ -33,6 +40,14 @@ AGENT_UPDATE = (
 THOUGHT = ("messages", (AIMessage(content="thinking about the cart", id="ai-2"), {"langgraph_node": "new_user_agent"}))
 
 
+def _as_v2_part(event):
+    """Scripted events are written as v1 ``(mode, payload)`` pairs; v2 wraps them in a typed part."""
+    if isinstance(event, tuple) and len(event) == 2:
+        mode, payload = event
+        return {"type": mode, "ns": (), "data": payload}
+    return event  # already a part (used to script unknown part types)
+
+
 class FakeGraph:
     """``attempts`` holds one script per astream call: a list of events, optionally ending in an Exception."""
 
@@ -44,15 +59,17 @@ class FakeGraph:
         self.existing_values = existing_values or {}
         self.initial_states = []
         self.controls = []
+        self.versions = []
         self.state_calls = 0
 
     async def aget_state(self, config):
         self.state_calls += 1
         return SimpleNamespace(values=self.existing_values if self.state_calls == 1 else self.final_values)
 
-    async def astream(self, initial_state, *, config, stream_mode, control=None):
+    async def astream(self, initial_state, *, config, stream_mode, control=None, version=None):
         self.initial_states.append(initial_state)
         self.controls.append(control)
+        self.versions.append(version)
         if self.on_stream:
             self.on_stream(control)
         assert config == {"configurable": {"thread_id": self.thread_id}}
@@ -60,7 +77,7 @@ class FakeGraph:
         for event in self.attempts.pop(0):
             if isinstance(event, Exception):
                 raise event
-            yield event
+            yield _as_v2_part(event) if version == "v2" else event
 
 
 class FakeReportLLM:
@@ -160,6 +177,89 @@ async def test_trace_skips_chunks_and_duplicate_message_ids(in_tmp_cwd):
     traces = (in_tmp_cwd / "report_test_new_user_01" / "traces.log").read_text(encoding="utf-8")
     assert "partial" not in traces
     assert traces.count("[new_user_agent] AIMessage") == 1
+
+
+# ---------------------------------------------------------------- stream format
+
+async def test_the_graph_is_streamed_with_the_v2_format():
+    graph = FakeGraph([[STEP]], final_values=FINAL)
+
+    await _run(graph)
+
+    assert graph.versions == ["v2"]
+
+
+async def test_a_node_that_changes_nothing_streams_as_none_and_is_handled(capsys):
+    # LangGraph reports a node that returned {} (e.g. the Summarizer on a short
+    # history) as {"Summarizer": None}. The old loop did `"messages" in None`.
+    noop = ("updates", {"Summarizer": None})
+    graph = FakeGraph([[STEP, AGENT_UPDATE, noop, STEP]], final_values=FINAL)
+
+    result, _ = await _run(graph)
+
+    assert result.thread_id == "test_new_user_01"
+    assert "Summarizer" in capsys.readouterr().out  # still shown as a step
+
+
+async def test_a_node_that_changes_nothing_is_handled_in_visual_mode(monkeypatch):
+    emitter = _Emitter()
+    monkeypatch.setattr(runner, "state_emitter", emitter)
+    graph = FakeGraph([[("updates", {"Summarizer": None})]], final_values=FINAL)
+
+    await _run(graph, visual=True)
+
+    updates = [kw for name, _, kw in emitter.calls if name == "update"]
+    assert {"active_node": "Summarizer"} in updates
+
+
+async def test_unknown_stream_parts_are_ignored():
+    unknown = {"type": "custom", "ns": (), "data": {"anything": 1}}
+    graph = FakeGraph([[unknown, STEP, AGENT_UPDATE]], final_values=FINAL)
+
+    result, _ = await _run(graph)
+
+    assert result.thread_id == "test_new_user_01"
+
+
+async def test_runs_end_to_end_on_a_real_langgraph_v2_stream(in_tmp_cwd):
+    # The fake graph above wraps events into v2 parts itself, so this is the test that
+    # proves real LangGraph yields the shape the runner reads.
+    reply = AIMessage(
+        content='clicked checkout <bugs_found>[{"title": "Checkout button stays disabled", "summary": "after valid input"}]</bugs_found>',
+        id="reply-1",
+    )
+    agent = create_agent(GenericFakeChatModel(messages=iter([reply])), tools=[], system_prompt="x")
+    calls = {"supervisor": 0}
+
+    async def supervisor(state):
+        calls["supervisor"] += 1
+        return {"next_agent": "new_user_agent" if calls["supervisor"] == 1 else "FINISH", "step_count": calls["supervisor"]}
+
+    workflow = StateGraph(AgentState)
+    workflow.add_node("Supervisor", supervisor)
+    workflow.add_node("new_user_agent", make_agent_node(agent, name="new_user_agent", quiet=True))
+    graph = compile_swarm(workflow, {"new_user_agent": None}, InMemorySaver())
+
+    result, llm = await _run(graph)
+
+    assert result.bugs == ["Checkout button stays disabled: after valid input"]
+    traces = (in_tmp_cwd / "report_test_new_user_01" / "traces.log").read_text(encoding="utf-8")
+    assert "STATE UPDATE FROM: Supervisor" not in traces  # it only changes routing fields, no messages
+    assert "STATE UPDATE FROM: new_user_agent" in traces
+    # The reply reaches the stream as a node update and as a complete message: traced once.
+    assert traces.count("clicked checkout") == 1
+    assert (in_tmp_cwd / "report_test_new_user_01" / "test_report.md").exists()
+    assert "BUGS CAPTURED (1):" in llm.prompts[0]
+
+
+async def test_trace_bytes_match_the_pre_refactor_output(in_tmp_cwd):
+    # tests/fixtures/legacy_traces.log was captured before the trace writer was
+    # extracted and the stream moved to v2: nothing a person reads may change.
+    await _run(FakeGraph([GOLDEN_EVENTS], final_values=FINAL))
+
+    actual = (in_tmp_cwd / "report_test_new_user_01" / "traces.log").read_text(encoding="utf-8")
+    expected = (Path(__file__).parent / "fixtures" / "legacy_traces.log").read_text(encoding="utf-8")
+    assert actual == expected
 
 
 # ---------------------------------------------------------------- graceful stop

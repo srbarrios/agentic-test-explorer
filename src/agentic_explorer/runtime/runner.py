@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
 
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.errors import GraphDrained
 from langgraph.runtime import RunControl
 
@@ -22,6 +22,7 @@ from agentic_explorer.reporting import (
     write_report,
 )
 from agentic_explorer.runtime.retry import with_retry
+from agentic_explorer.runtime.tracing import TraceWriter
 from agentic_explorer.tools.browser.engine import get_action_tape
 from agentic_explorer.ui import state_emitter
 from agentic_explorer.utils import console
@@ -36,14 +37,6 @@ class MissionResult:
     bugs: List[str]
     paths: List[str]
     tape_len: int
-
-
-def _strip_extras(msg) -> None:
-    """Remove the noisy 'extras' block from list-content messages in place."""
-    if isinstance(msg.content, list):
-        for block in msg.content:
-            if isinstance(block, dict) and "extras" in block:
-                del block["extras"]
 
 
 def _initial_state(prompt: str) -> Dict[str, Any]:
@@ -71,20 +64,25 @@ async def stream_mission(
     ``initial_state=None`` resumes from the thread's saved checkpoint. If ``control``
     is drained the graph stops at the next step boundary and raises ``GraphDrained``.
     """
-    seen_message_ids: set[str] = set()
-    trace_path = os.path.join(report_dir(thread_id), "traces.log")
+    trace = TraceWriter(os.path.join(report_dir(thread_id), "traces.log"))
     run_config = {"configurable": {"thread_id": thread_id}}
     current_node: str | None = None
 
-    async for mode, payload in graph.astream(
+    # v2 yields typed parts ({"type", "ns", "data"}) instead of (mode, payload) tuples.
+    # The payloads are the same; `ns` is always () here because agents are not subgraphs.
+    async for part in graph.astream(
         initial_state,
         config=run_config,
         stream_mode=["updates", "messages"],
         control=control,
+        version="v2",
     ):
-        if mode == "updates":
-            # payload: {node_name: state_update}
-            for node_name, state_update in payload.items():
+        if part["type"] == "updates":
+            # part["data"]: {node_name: state_update}
+            for node_name, state_update in part["data"].items():
+                # A node that changed nothing (e.g. the Summarizer on a short history,
+                # which returns {}) is reported by LangGraph as None, not as {}.
+                state_update = state_update or {}
                 if current_node is not None:
                     console.state_update_end()
                 current_node = node_name
@@ -107,35 +105,16 @@ async def stream_mission(
 
                 if "messages" in state_update and state_update["messages"]:
                     messages = state_update["messages"] if isinstance(state_update["messages"], list) else [state_update["messages"]]
-                    with open(trace_path, "a", encoding="utf-8") as trace_file:
-                        trace_file.write(f"\nSTATE UPDATE FROM: {node_name}\n")
-                        for msg in messages:
-                            _strip_extras(msg)
-                            msg_id = getattr(msg, "id", None)
-                            if msg_id and msg_id in seen_message_ids:
-                                continue
-                            if msg_id:
-                                seen_message_ids.add(msg_id)
-                            trace_file.write(msg.pretty_repr() + "\n")
+                    trace.node_update(node_name, messages)
 
-        elif mode == "messages":
-            msg, meta = payload
+        elif part["type"] == "messages":
+            msg, meta = part["data"]
             node_name = meta.get("langgraph_node") or current_node or "?"
 
-            # Skip mid-stream chunks — wait for the final assembled message.
-            if isinstance(msg, AIMessageChunk):
+            # Written to traces.log (regardless of --quiet) unless it is a streaming chunk,
+            # a system prompt or a message already traced; those are skipped everywhere.
+            if not trace.message(node_name, msg):
                 continue
-            # Skip system prompt messages — they are static boilerplate.
-            if isinstance(msg, SystemMessage):
-                continue
-
-            msg_id = getattr(msg, "id", None)
-            if msg_id and msg_id in seen_message_ids:
-                continue
-            if msg_id:
-                seen_message_ids.add(msg_id)
-
-            _strip_extras(msg)
 
             # Console: ReAct lines (compact when --quiet).
             _max = 120 if quiet else 500
@@ -151,11 +130,6 @@ async def stream_mission(
             if visual and isinstance(msg, AIMessage):
                 state_emitter.append_thought(node_name, message_text(msg))
                 state_emitter.emit()
-
-            # Trace file: full pretty_repr for every message (regardless of --quiet).
-            with open(trace_path, "a", encoding="utf-8") as trace_file:
-                trace_file.write(f"\n[{node_name}] {msg.__class__.__name__}\n")
-                trace_file.write(msg.pretty_repr() + "\n")
 
     if current_node is not None:
         console.state_update_end()
