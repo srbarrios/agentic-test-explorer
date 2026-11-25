@@ -640,6 +640,8 @@ For every mission, the framework generates a `report_<thread_id>/` directory con
    long-term memory operation failed.
 3. **`action_tape.jsonl`** — Line-delimited JSON log of every deterministic browser
    command. The source for reproduction scripts. Each entry may carry a `snapshot_ref`.
+   Values typed into password/token/OTP fields are redacted (`"<redacted>"`) in the tape, the
+   spec and `traces.log`; the generated spec reads them from `REPLAY_SECRET_1`, `REPLAY_SECRET_2`, ...
    Next to it, **`tape_meta.json`** records where the tape came from (see
    [Provenance and Evidence](#provenance-and-evidence)) and **`snapshots/`** holds what the
    agent saw at each step.
