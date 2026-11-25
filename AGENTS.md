@@ -190,7 +190,9 @@ The framework is configured through three user-supplied files (templates ship as
     * `generate_reproduction_spec` — translates the Action Tape into a `reproduction_*.spec.ts`
       Playwright script. Optional `observed` / `expected` arguments turn the last successful
       `extract_text` step into a real `toContain` assertion. The spec header carries the tape
-      provenance and a setup check throws `SETUP_FAILURE` before the `BUG STEPS` marker.
+      provenance and a setup check throws `SETUP_FAILURE` before the `BUG STEPS` marker. The spec
+      uses the recording's action/navigation timeouts (`ACTION_TIMEOUT_MS`,
+      `NAVIGATION_TIMEOUT_MS`) and warns when it asserts no symptom (a pass is not a fix).
     * Raw `PlayWrightBrowserToolkit` tools (`click_element`, `navigate_browser`, etc.) are
       **filtered out** from agents; they exist only for the monkey-patch self-healing
       mechanism.

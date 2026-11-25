@@ -885,7 +885,7 @@ The Action Tape is translated into an executable Playwright script (`generate_pl
  */
 import { test, expect } from '@playwright/test';
 
-test.use({ storageState: 'auth.json' });
+test.use({ storageState: 'auth.json', actionTimeout: 5000, navigationTimeout: 15000 });
 
 test('reproduce: Cart total ignores discount', async ({ page }) => {
   test.setTimeout(120_000);
@@ -898,6 +898,8 @@ test('reproduce: Cart total ignores discount', async ({ page }) => {
   expect(_t).toContain('$96.00');   // the expected value, when the agent reported one
 });
 ```
+
+The spec uses the same per-action (5 s) and navigation (15 s) timeouts as the recording browser context (`ACTION_TIMEOUT_MS` / `NAVIGATION_TIMEOUT_MS` in `engine.py`, shared with `main.py`), so a step that failed fast while recording also fails fast on replay, with Playwright's own `waiting for locator(...)` message, instead of sitting until the 120 s test timeout. A spec that asserts no symptom (no `expected` value, or nothing read with `extract_text`) carries a `WARNING` in its header and a `warning` annotation in the Playwright report: a pass does **not** mean the bug is fixed.
 
 Actions that failed at record time are included as **comments** to document the bug. Without an `expected` value the `extract_text` step keeps the weak "text exists" check and the observed value is left as a comment.
 

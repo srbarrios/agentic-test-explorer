@@ -15,16 +15,19 @@
  *   Place an authenticated storage state at ./auth.json
  * Run:
  *   npx playwright test reproduction_Save_fails_1700000000.spec.ts --headed
+ * WARNING: no symptom assertion. This spec replays the recorded steps; a pass does NOT
+ *   mean the bug is fixed. Add an expect(...) for the symptom before using it as a regression test.
  * Reading a failure:
  *   SETUP_FAILURE   -> the session or starting data is not the one recorded; the bug was not reached.
  *   any other error -> the steps after '--- BUG STEPS ---' ran, so the failure is the reproduction.
  */
 import { test, expect } from '@playwright/test';
 
-test.use({ storageState: 'auth.json' });
+test.use({ storageState: 'auth.json', actionTimeout: 5000, navigationTimeout: 15000 });
 
 test('reproduce: Save fails', async ({ page }) => {
   test.setTimeout(120_000);
+  test.info().annotations.push({ type: 'warning', description: 'This spec replays the recorded steps but asserts no symptom: passing does NOT mean the bug is fixed.' });
   // App base URL recorded at capture time: https://app.example
   // --- SETUP CHECK (a failure here is NOT the bug) ---
   const _baseUrl = 'https://app.example';

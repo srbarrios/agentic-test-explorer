@@ -19,7 +19,7 @@
  */
 import { test, expect } from '@playwright/test';
 
-test.use({ storageState: 'auth.json' });
+test.use({ storageState: 'auth.json', actionTimeout: 5000, navigationTimeout: 15000 });
 
 test('reproduce: Total ignores discount', async ({ page }) => {
   test.setTimeout(120_000);
