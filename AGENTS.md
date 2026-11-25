@@ -294,7 +294,9 @@ Every mission generates artifacts localized in a `report_<thread_id>/` directory
   LLM) appends the findings: confirmed bugs with Observed / Expected / Where and a separate
   **Not determined** section.
 * `action_tape.jsonl`: Immutable, line-delimited JSON log of every deterministic browser
-  command executed (used for reproduction). Entries may carry `snapshot_ref`.
+  command executed (used for reproduction). Entries may carry `snapshot_ref`. Values typed
+  into secret fields (`tools/browser/redaction.py`) are recorded as `<redacted>`; the spec
+  reads them from `REPLAY_SECRET_n` environment variables.
 * `tape_meta.json`: Provenance written once per mission (app name/URL, app revision from
   `--app-revision` > `APP_REVISION` > `app.revision`, session start, SHA-256 of `auth.json` —
   never its content —, tool version, `app.seed` preconditions). A sidecar on purpose, so the

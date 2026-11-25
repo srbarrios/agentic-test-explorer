@@ -864,6 +864,8 @@ Cada entrada contiene:
 }
 ```
 
+**Los secretos escritos se redactan.** Un `fill` en un campo de contrasena, token, OTP o API key (reconocido por su selector, o porque el elemento es `type=password`) se registra como `"value": "<redacted>"` con `"redacted": true`. El navegador sigue recibiendo el valor real; la cinta, la salida de la herramienta, el spec generado y `traces.log` solo ven el marcador. En el spec esos pasos leen `process.env.REPLAY_SECRET_1`, `REPLAY_SECRET_2`, ... (por orden de aparicion) y la cabecera lo indica. El checkpoint de LangGraph (`agent_memory.sqlite`) conserva la conversacion del propio agente, asi que no pongas secretos reales en los prompts de las misiones.
+
 ### Generacion de .spec.ts
 
 El Action Tape se traduce a un script ejecutable de Playwright (`generate_playwright_spec` en `engine.py`). La cabecera lleva la procedencia de la grabacion, primero corre una **comprobacion de preparacion** y los pasos grabados empiezan tras el marcador `BUG STEPS`:

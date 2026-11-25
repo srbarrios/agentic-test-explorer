@@ -39,6 +39,7 @@ from langchain_core.tools import tool
 from playwright.async_api import Page
 
 from agentic_explorer.tools.browser.provenance import load_provenance
+from agentic_explorer.tools.browser.redaction import is_sensitive_selector, redact_params
 from agentic_explorer.tools.browser.snapshots import persist_snapshot
 from agentic_explorer.utils import console
 
@@ -490,10 +491,21 @@ def get_browser_command_tool(page: Page):
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
 
+        # Typed secrets never reach the tape, the tool output or the spec (see redaction.py).
+        # A selector that does not look secret can still be a password field: ask the element.
+        element_is_password = False
+        if action == "fill" and err is None and not is_sensitive_selector(params.get("selector")):
+            try:
+                kind = await page.eval_on_selector(params["selector"], "el => (el.type || '').toLowerCase()")
+                element_is_password = str(kind).lower() == "password"
+            except Exception:
+                pass  # the element is gone or the page cannot say: keep the selector-based decision
+        safe_params = redact_params(action, params, element_is_password=element_is_password)
+
         snap = await extract_dom_snapshot(page)
         duration_ms = int((time.time() - started) * 1000)
         result = ExecutionResult(
-            ok=err is None, action=action, params=params,
+            ok=err is None, action=action, params=safe_params,
             started_at=started, duration_ms=duration_ms,
             result=res, error=err, snapshot=snap,
         )
@@ -510,7 +522,7 @@ def get_browser_command_tool(page: Page):
         if state_emitter.is_enabled():
             state_emitter.schedule_screenshot(page)
             state_emitter.update(
-                last_action=f"{action} {json.dumps(params, ensure_ascii=False)[:200]}",
+                last_action=f"{action} {json.dumps(safe_params, ensure_ascii=False)[:200]}",
                 action_tape_recent=get_action_tape(thread_id)[-15:],
             )
             state_emitter.emit()
@@ -518,7 +530,7 @@ def get_browser_command_tool(page: Page):
         status = "OK" if result.ok else "ERROR"
         body = [
             f"STATUS: {status}",
-            f"ACTION: {action} {json.dumps(params, ensure_ascii=False)}",
+            f"ACTION: {action} {json.dumps(safe_params, ensure_ascii=False)}",
             f"DURATION_MS: {duration_ms}",
         ]
         if result.ok:
@@ -552,8 +564,11 @@ def _ts_escape(s: str) -> str:
 
 def _tape_entry_to_ts(
     entry: Dict[str, Any], *, expected: Optional[str] = None, observed: Optional[str] = None,
+    secret_env: Optional[str] = None,
 ) -> Optional[str]:
     """TypeScript for one tape entry.
+
+    A redacted ``fill`` reads its value from the ``secret_env`` environment variable.
 
     ``expected`` / ``observed`` only matter for ``extract_text``: with an expected value the
     step asserts it (``toContain``); without one it keeps the weak "text exists" check and
@@ -571,6 +586,8 @@ def _tape_entry_to_ts(
     if a == "click":
         return prefix + f"  await page.click('{_ts_escape(p['selector'])}');"
     if a == "fill":
+        if p.get("redacted") and secret_env:
+            return prefix + f"  await page.fill('{_ts_escape(p['selector'])}', process.env.{secret_env} ?? '');"
         return prefix + f"  await page.fill('{_ts_escape(p['selector'])}', '{_ts_escape(str(p.get('value','')))}');"
     if a == "press":
         return prefix + f"  await page.press('{_ts_escape(p['selector'])}', '{_ts_escape(p['key'])}');"
@@ -699,10 +716,15 @@ def generate_playwright_spec(
         (i for i, e in enumerate(tape) if e.get("action") == "extract_text" and e.get("ok")), default=None,
     )
     steps: List[str] = []
+    secrets = 0
     for i, entry in enumerate(tape):
+        secret_env = None
+        if (entry.get("params") or {}).get("redacted"):
+            secrets += 1
+            secret_env = f"REPLAY_SECRET_{secrets}"
         line = (
-            _tape_entry_to_ts(entry, expected=expected, observed=observed) if i == target
-            else _tape_entry_to_ts(entry)
+            _tape_entry_to_ts(entry, expected=expected, observed=observed, secret_env=secret_env) if i == target
+            else _tape_entry_to_ts(entry, secret_env=secret_env)
         )
         if line:
             steps.append(line)
@@ -725,6 +747,11 @@ def generate_playwright_spec(
         " * Prerequisites:",
         " *   npm i -D @playwright/test && npx playwright install chromium",
         f" *   Place an authenticated storage state at ./{storage_state_path}",
+        *(
+            [f" *   Set REPLAY_SECRET_1..REPLAY_SECRET_{secrets}: values typed into password/secret fields were",
+             " *   redacted from the recording, in the order they appear below"]
+            if secrets else []
+        ),
         " * Run:",
         " *   npx playwright test " + os.path.basename(spec_path) + " --headed",
         " * Reading a failure:",

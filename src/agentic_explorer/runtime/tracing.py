@@ -12,6 +12,8 @@ from typing import Iterable, Set
 
 from langchain_core.messages import AIMessageChunk, BaseMessage, SystemMessage
 
+from agentic_explorer.tools.browser.redaction import scrub
+
 
 def strip_extras(msg: BaseMessage) -> None:
     """Remove the noisy ``extras`` block from list-content messages, in place."""
@@ -45,7 +47,7 @@ class TraceWriter:
             for msg in messages:
                 strip_extras(msg)
                 if self._is_new(msg):
-                    trace_file.write(msg.pretty_repr() + "\n")
+                    trace_file.write(scrub(msg.pretty_repr()) + "\n")
 
     def message(self, node: str, msg: BaseMessage) -> bool:
         """Write one complete message; return whether it was new.
@@ -61,5 +63,5 @@ class TraceWriter:
         strip_extras(msg)
         with open(self.path, "a", encoding="utf-8") as trace_file:
             trace_file.write(f"\n[{node}] {msg.__class__.__name__}\n")
-            trace_file.write(msg.pretty_repr() + "\n")
+            trace_file.write(scrub(msg.pretty_repr()) + "\n")
         return True

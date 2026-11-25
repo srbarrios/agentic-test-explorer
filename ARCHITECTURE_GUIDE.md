@@ -864,6 +864,8 @@ Each entry contains:
 }
 ```
 
+**Typed secrets are redacted.** A `fill` into a password, token, OTP or API-key field (recognised by its selector, or because the element is `type=password`) is recorded as `"value": "<redacted>"` with `"redacted": true`. The browser still receives the real value; the tape, the tool output, the generated spec and `traces.log` only see the placeholder. In the spec those steps read `process.env.REPLAY_SECRET_1`, `REPLAY_SECRET_2`, ... (in order of appearance), and the header says so. The LangGraph checkpoint (`agent_memory.sqlite`) still holds the agent's own conversation, so do not put real secrets in mission prompts.
+
 ### .spec.ts Generation
 
 The Action Tape is translated into an executable Playwright script (`generate_playwright_spec` in `engine.py`). The header carries the provenance of the recording, a **setup check** runs first, and the recorded steps start after the `BUG STEPS` marker:
