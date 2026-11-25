@@ -301,6 +301,11 @@ Every mission generates artifacts localized in a `report_<thread_id>/` directory
   `--app-revision` > `APP_REVISION` > `app.revision`, session start, SHA-256 of `auth.json` —
   never its content —, tool version, `app.seed` preconditions). A sidecar on purpose, so the
   tape itself only holds actions.
+* Replay: `agent-explorer --replay <thread_id>` (`runtime/replay.py`) re-executes the tape in a
+  fresh browser with no LLM and exits 0 `REPRODUCED`, 1 `NOT_REPRODUCED`, 2 `SETUP_FAILURE`,
+  3 `DIVERGED`, 4 `INCONCLUSIVE`; it writes `replay.json`. Redacted values come from
+  `REPLAY_SECRET_n`. Replaying has the mission's side effects. After a `fill` the tape entry
+  carries `effect.value_matches` (never the value).
 * Session loss: with `auth.json` loaded, `tools/browser/session.py` turns a redirect to a
   login page into `STATUS: AUTH_REQUIRED`, marks the tape entry `auth_required`, and drains the
   run (exit 130). Re-run `agent-auth`, then the same command to resume. `tape_meta.json`

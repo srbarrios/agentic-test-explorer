@@ -937,6 +937,29 @@ flowchart TD
 
 Limits worth knowing: the redirect check recognises login pages by path (`/login`, `/signin`, `/sso`, `/auth`), so an app whose login lives at `/` is not detected. The recommended habit is to **run the spec once in a clean session before reporting a bug**; the framework does not do that for you.
 
+### Replaying a Tape Without a Model
+
+`agent-explorer --replay <thread_id>` re-executes `report_<thread_id>/action_tape.jsonl` in a fresh browser context (with `auth.json` if present) and compares each step with what was recorded. It needs no LLM, no credentials and no node: the engine's `_dispatch` only needs a Playwright page. It makes "reproducible" a measured property and can gate a CI job through its exit code.
+
+```mermaid
+flowchart TD
+    T[report_thread/action_tape.jsonl] --> E{Anything to compare?}
+    E -- no --> I[INCONCLUSIVE, exit 4]
+    E -- yes --> X[Re-execute each step in a fresh browser]
+    X --> L{Landed on a login page the recording never visited?}
+    L -- yes --> S[SETUP_FAILURE, exit 2]
+    L -- no --> C{Same outcome as recorded?}
+    C -- yes, to the end --> R[REPRODUCED, exit 0]
+    C -- no, at the symptom step --> N[NOT_REPRODUCED, exit 1]
+    C -- no, before the symptom --> D[DIVERGED, exit 3]
+```
+
+* A *symptom step* is one that failed when recorded, or the last `extract_text` (the value the bug is about). Execution stops at the first step that differs, because what follows would run against a different state.
+* Values redacted from the tape are read from `REPLAY_SECRET_1`, `REPLAY_SECRET_2`, ... exactly like the generated spec; if one is missing the verdict is `INCONCLUSIVE` and the browser is never touched.
+* The result is also written to `report_<thread_id>/replay.json` (verdict, reason and one line per step; never secret values).
+* **Side effects:** replaying runs the recorded actions against the real app, so it can create data like the mission did. It never runs by itself.
+* After a `fill` the engine reads the field back and records `"effect": {"value_matches": true|false}` on the tape entry (never the value). When the field did not keep what was typed, the agent is told (`EFFECT: ...`), which is the case of text typed into the wrong element or rewritten by the page.
+
 ### An Expired Session Stops the Mission
 
 If `auth.json` was loaded and the saved session expires, the app redirects to a login page. Without a check the agent would explore the login form as if it were the application and report it as a bug. `tools/browser/session.py` looks at every command's outcome and answers `STATUS: AUTH_REQUIRED` when:

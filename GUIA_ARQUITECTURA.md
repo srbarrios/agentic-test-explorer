@@ -937,6 +937,29 @@ flowchart TD
 
 Limites que conviene conocer: la comprobacion de redireccion reconoce paginas de login por su ruta (`/login`, `/signin`, `/sso`, `/auth`), asi que una app cuyo login vive en `/` no se detecta. El habito recomendado es **ejecutar el spec una vez en una sesion limpia antes de reportar un bug**; el framework no lo hace por ti.
 
+### Reejecutar una cinta sin modelo
+
+`agent-explorer --replay <thread_id>` reejecuta `report_<thread_id>/action_tape.jsonl` en un contexto de navegador limpio (con `auth.json` si existe) y compara cada paso con lo grabado. No necesita LLM, ni credenciales, ni node: el `_dispatch` del motor solo necesita una pagina de Playwright. Convierte "reproducible" en una propiedad medida y puede servir de puerta en CI mediante su codigo de salida.
+
+```mermaid
+flowchart TD
+    T[report_thread/action_tape.jsonl] --> E{Hay algo que comparar?}
+    E -- no --> I[INCONCLUSIVE, exit 4]
+    E -- si --> X[Reejecutar cada paso en un navegador limpio]
+    X --> L{Aterriza en un login que la grabacion nunca visito?}
+    L -- si --> S[SETUP_FAILURE, exit 2]
+    L -- no --> C{Mismo resultado que lo grabado?}
+    C -- si, hasta el final --> R[REPRODUCED, exit 0]
+    C -- no, en el paso del sintoma --> N[NOT_REPRODUCED, exit 1]
+    C -- no, antes del sintoma --> D[DIVERGED, exit 3]
+```
+
+* Un *paso sintoma* es uno que fallo al grabar, o el ultimo `extract_text` (el valor del que trata el bug). La ejecucion se detiene en el primer paso que difiere, porque lo que sigue se ejecutaria sobre un estado distinto.
+* Los valores redactados de la cinta se leen de `REPLAY_SECRET_1`, `REPLAY_SECRET_2`, ... igual que en el spec generado; si falta alguno el veredicto es `INCONCLUSIVE` y no se toca el navegador.
+* El resultado tambien se escribe en `report_<thread_id>/replay.json` (veredicto, motivo y una linea por paso; nunca valores secretos).
+* **Efectos secundarios:** reejecutar ejecuta las acciones grabadas contra la app real, asi que puede crear datos igual que la mision. Nunca se lanza solo.
+* Tras un `fill` el motor vuelve a leer el campo y registra `"effect": {"value_matches": true|false}` en la entrada de la cinta (nunca el valor). Si el campo no conservo lo escrito, se avisa al agente (`EFFECT: ...`), que es el caso del texto escrito en el elemento equivocado o reescrito por la pagina.
+
 ### Una sesion caducada detiene la mision
 
 Si se cargo `auth.json` y la sesion guardada caduca, la app redirige a una pagina de login. Sin una comprobacion el agente exploraria el formulario como si fuera la aplicacion y lo reportaria como bug. `tools/browser/session.py` examina el resultado de cada comando y responde `STATUS: AUTH_REQUIRED` cuando:
