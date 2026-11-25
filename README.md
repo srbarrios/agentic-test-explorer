@@ -672,6 +672,10 @@ flowchart TD
     S -- passes --> D[Not reproduced: compare the app revision and the data in the header]
 ```
 
+If the saved session (`auth.json`) expires during a mission, the run stops cleanly with exit
+code 130 and a message instead of testing the login page: run `agent-auth`, then the same
+command to resume with the tape intact.
+
 Run the spec once in a clean session before reporting a bug. The redirect check recognises
 login pages by path (`/login`, `/signin`, `/sso`, `/auth`), so an app whose login lives at `/`
 is not detected.

@@ -104,6 +104,11 @@ def write_provenance(
         "seed": list(seed),
     }
     _PROVENANCE[thread_id] = meta
+    _persist(thread_id, meta)
+    return meta
+
+
+def _persist(thread_id: str, meta: Dict[str, Any]) -> None:
     try:
         os.makedirs(f"report_{thread_id}", exist_ok=True)
         with open(_meta_path(thread_id), "w", encoding="utf-8") as fh:
@@ -111,4 +116,23 @@ def write_provenance(
             fh.write("\n")
     except OSError as exc:  # pragma: no cover - best-effort, the in-memory copy still serves the spec
         console.warn(f"Failed to persist tape provenance: {exc}")
-    return meta
+
+
+def record_auth_if_changed(thread_id: str) -> bool:
+    """On a resumed mission, note in ``auth_history`` that ``auth.json`` is not the one recorded.
+
+    The header keeps the fingerprint of the first run (``auth_state``); each later session
+    that differs from the last known one is appended (hash and mtime only). Returns whether
+    something was added.
+    """
+    meta = load_provenance(thread_id)
+    if meta is None:
+        return False
+    current = auth_fingerprint()
+    history = meta.setdefault("auth_history", [])
+    last_known = (history[-1] if history else meta.get("auth_state")) or {}
+    if current["sha256"] is None or current["sha256"] == last_known.get("sha256"):
+        return False
+    history.append({"at": _now_iso(), "sha256": current["sha256"], "modified": current["modified"]})
+    _persist(thread_id, meta)
+    return True

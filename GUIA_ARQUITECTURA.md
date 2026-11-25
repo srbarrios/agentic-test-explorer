@@ -937,6 +937,15 @@ flowchart TD
 
 Limites que conviene conocer: la comprobacion de redireccion reconoce paginas de login por su ruta (`/login`, `/signin`, `/sso`, `/auth`), asi que una app cuyo login vive en `/` no se detecta. El habito recomendado es **ejecutar el spec una vez en una sesion limpia antes de reportar un bug**; el framework no lo hace por ti.
 
+### Una sesion caducada detiene la mision
+
+Si se cargo `auth.json` y la sesion guardada caduca, la app redirige a una pagina de login. Sin una comprobacion el agente exploraria el formulario como si fuera la aplicacion y lo reportaria como bug. `tools/browser/session.py` examina el resultado de cada comando y responde `STATUS: AUTH_REQUIRED` cuando:
+
+* la pagina aterrizo en una ruta de login (`/login`, `/signin`, `/sso`, `/auth`), o
+* muestra un campo de contrasena justo despues de cambiar de pagina, en una ruta que no trata de contrasenas ni cuentas (`/settings`, `/profile`, `/register`, ...), lo que cubre apps cuyo login vive en `/`.
+
+No salta si no se cargo ninguna sesion, si el agente navego a una URL de login a proposito, o si ya escribio una contrasena el mismo (esta haciendo login). Al detectarlo, la entrada de la cinta recibe `"auth_required": true`, se le dice al agente que termine su turno con `<bugs_found>[]</bugs_found>` y la ejecucion se detiene con el mismo mecanismo que Ctrl-C: el paso en curso termina, se guarda el checkpoint y el proceso sale con codigo 130. Ejecuta `agent-auth` y despues el mismo comando; la mision se reanuda con su cinta. `tape_meta.json` conserva la huella de la primera ejecucion en `auth_state` y anade cada `auth.json` posterior y distinto a `auth_history` (solo hash y fecha de modificacion). No hay reautenticacion en vivo dentro de una mision en marcha ni automatizacion de 2FA: `agent-auth` espera 15 s al selector posterior al login.
+
 ### Lo que vio el agente: instantaneas por paso
 
 Tras cada comando el motor muestra al agente una instantanea compacta del DOM / arbol de accesibilidad. Ese texto exacto se guarda en `report_<thread_id>/snapshots/step_NNNN.txt` y la entrada de la cinta solo lleva `"snapshot_ref": "snapshots/step_0003.txt"`, asi `action_tape.jsonl` no crece. Cada instantanea se limita a 12.000 caracteres y solo se conservan las ultimas `AGENT_SNAPSHOT_KEEP` (200 por defecto); `AGENT_SNAPSHOT_KEEP=0` desactiva la funcion. Una referencia a un paso podado apunta a un fichero que ya no existe.

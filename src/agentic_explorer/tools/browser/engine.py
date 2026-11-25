@@ -38,8 +38,10 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from playwright.async_api import Page
 
+from agentic_explorer.tools.browser import session
 from agentic_explorer.tools.browser.provenance import load_provenance
 from agentic_explorer.tools.browser.redaction import is_sensitive_selector, redact_params
+from agentic_explorer.tools.browser.session import LOGIN_PATH_PATTERN
 from agentic_explorer.tools.browser.snapshots import persist_snapshot
 from agentic_explorer.utils import console
 
@@ -516,7 +518,15 @@ def get_browser_command_tool(page: Page):
         snapshot_ref = persist_snapshot(thread_id, snapshot_text)
         if snapshot_ref:
             entry["snapshot_ref"] = snapshot_ref
+        # Did the saved session just expire? (checked against the tape *before* this entry)
+        session_lost = await session.check_page(
+            page, action=action, params=safe_params, tape=get_action_tape(thread_id),
+        )
+        if session_lost:
+            entry["auth_required"] = True
         _append_tape(thread_id, entry)
+        if session_lost:
+            session.request_stop()
 
         from agentic_explorer.ui import state_emitter
         if state_emitter.is_enabled():
@@ -527,13 +537,15 @@ def get_browser_command_tool(page: Page):
             )
             state_emitter.emit()
 
-        status = "OK" if result.ok else "ERROR"
+        status = "AUTH_REQUIRED" if session_lost else ("OK" if result.ok else "ERROR")
         body = [
             f"STATUS: {status}",
             f"ACTION: {action} {json.dumps(safe_params, ensure_ascii=False)}",
             f"DURATION_MS: {duration_ms}",
         ]
-        if result.ok:
+        if session_lost:
+            body.append(session.AUTH_REQUIRED_MESSAGE)
+        elif result.ok:
             body.append(f"RESULT: {res}")
         else:
             body.append(f"ERROR: {err}  (Recoverable — try a different selector or action.)")
@@ -649,7 +661,7 @@ def _provenance_comment(meta: Mapping[str, Any]) -> List[str]:
     return lines
 
 
-_LOGIN_PATH_TS = r"/\/(log-?in|sign-?in|auth|sso)(\/|$)/i"
+_LOGIN_PATH_TS = "/" + LOGIN_PATH_PATTERN.replace("/", "\\/") + "/i"  # the same pattern, as a JS regex
 
 
 def _setup_check(base_url: Optional[str], tape: List[Dict[str, Any]]) -> List[str]:

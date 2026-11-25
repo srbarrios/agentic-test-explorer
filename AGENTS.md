@@ -301,6 +301,10 @@ Every mission generates artifacts localized in a `report_<thread_id>/` directory
   `--app-revision` > `APP_REVISION` > `app.revision`, session start, SHA-256 of `auth.json` —
   never its content —, tool version, `app.seed` preconditions). A sidecar on purpose, so the
   tape itself only holds actions.
+* Session loss: with `auth.json` loaded, `tools/browser/session.py` turns a redirect to a
+  login page into `STATUS: AUTH_REQUIRED`, marks the tape entry `auth_required`, and drains the
+  run (exit 130). Re-run `agent-auth`, then the same command to resume. `tape_meta.json`
+  records each later `auth.json` fingerprint in `auth_history`.
 * `snapshots/step_NNNN.txt`: The exact DOM snapshot the agent saw after each command, capped
   per file; the last `AGENT_SNAPSHOT_KEEP` (default 200, `0` = off) are kept.
 * `reproduction_*.spec.ts`: Auto-generated Playwright TypeScript test files. Run with
