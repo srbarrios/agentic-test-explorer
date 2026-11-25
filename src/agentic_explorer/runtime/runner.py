@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -13,9 +13,10 @@ from langgraph.runtime import RunControl
 
 from agentic_explorer.memory import app_url_hash, write_episode_memory
 from agentic_explorer.memory_health import guarded, memory_health
-from agentic_explorer.orchestration.graph_base import dedupe_bugs
+from agentic_explorer.orchestration.findings import split_findings
 from agentic_explorer.reporting import (
     append_action_tape_summary,
+    append_findings_section,
     build_transcript,
     generate_report,
     make_report_llm,
@@ -25,6 +26,7 @@ from agentic_explorer.reporting import (
 from agentic_explorer.runtime.retry import with_retry
 from agentic_explorer.runtime.tracing import TraceWriter
 from agentic_explorer.tools.browser.engine import get_action_tape
+from agentic_explorer.tools.browser.provenance import write_provenance
 from agentic_explorer.ui import state_emitter
 from agentic_explorer.utils import console
 from agentic_explorer.utils.messages import message_text
@@ -39,6 +41,7 @@ class MissionResult:
     paths: List[str]
     tape_len: int
     memory_errors: int = 0  # memory operations that failed during this mission
+    uncertain: List[str] = field(default_factory=list)  # findings the agent could not confirm (not in ``bugs``)
 
 
 def _initial_state(prompt: str) -> Dict[str, Any]:
@@ -101,6 +104,10 @@ async def stream_mission(
                     # rather than overwrite so the cumulative count is preserved.
                     if "bugs_found" in state_update:
                         state_emitter.add_bugs(state_update["bugs_found"])
+                    if "uncertain_findings" in state_update:
+                        state_emitter.add_uncertain(state_update["uncertain_findings"])
+                    if "bug_evidence" in state_update:
+                        state_emitter.add_evidence(state_update["bug_evidence"])
                     if "explored_paths" in state_update:
                         state_emitter.add_paths(state_update["explored_paths"])
                     state_emitter.emit()
@@ -147,6 +154,7 @@ async def run_mission(
     quiet: bool = False,
     visual: bool = False,
     control: Optional[RunControl] = None,
+    provenance: Optional[Mapping[str, Any]] = None,
     report_llm_factory: Callable[[], Any] = make_report_llm,
     sleep: Optional[Callable[[float], Awaitable[None]]] = None,
 ) -> MissionResult:
@@ -173,6 +181,8 @@ async def run_mission(
             step_count=0,
             bugs_count=0,
             bugs_found=[],
+            uncertain_findings=[],
+            bug_evidence=[],
             explored_paths=[],
             last_thought="",
             last_action="",
@@ -187,6 +197,9 @@ async def run_mission(
     resuming = bool(existing_state.values)
 
     os.makedirs(report_dir(thread_id), exist_ok=True)
+    if provenance is not None:
+        # Written once: a resumed mission keeps the header of its first run.
+        write_provenance(thread_id, **provenance)
     trace_path = os.path.join(report_dir(thread_id), "traces.log")
     # A resumed mission (after a stop or a crash) keeps the trace of its first half.
     with open(trace_path, "a" if resuming else "w", encoding="utf-8") as f:
@@ -208,10 +221,18 @@ async def run_mission(
 
     console.step(f"Generating report for {thread_id}...")
     final_state = await graph.aget_state(run_config)
-    bugs_found = dedupe_bugs(final_state.values.get("bugs_found", []))
+    # bugs_found holds confirmed findings only; the ones the agent could not confirm are
+    # counted and shown apart, never mixed into the bug count.
+    bugs_found, uncertain = split_findings(
+        final_state.values.get("bugs_found", []), final_state.values.get("uncertain_findings", []),
+    )
+    evidence = final_state.values.get("bug_evidence", [])
     transcript = build_transcript(final_state.values.get("messages", []))
-    report_text = await generate_report(thread_id, transcript, bugs_found, report_llm_factory(), sleep=sleep)
+    report_text = await generate_report(
+        thread_id, transcript, bugs_found, report_llm_factory(), uncertain=uncertain, sleep=sleep,
+    )
     write_report(thread_id, report_text)
+    append_findings_section(thread_id, bugs_found, uncertain, evidence)
 
     tape = get_action_tape(thread_id)
     explored_paths = final_state.values.get("explored_paths", [])
@@ -223,6 +244,7 @@ async def run_mission(
             "episode memory write",
             lambda: write_episode_memory(
                 store, app_url_hash(app_url), thread_id, prompt, tape, bugs_found, explored_paths,
+                bug_evidence=evidence,
             ),
         )
 
@@ -236,10 +258,11 @@ async def run_mission(
     memory_errors = memory_health.count_since(memory_mark)
     append_action_tape_summary(
         thread_id, tape_len=len(tape), bugs_count=len(bugs_found), memory_errors=memory_errors,
+        uncertain_count=len(uncertain),
     )
     return MissionResult(
         thread_id=thread_id, bugs=bugs_found, paths=explored_paths, tape_len=len(tape),
-        memory_errors=memory_errors,
+        memory_errors=memory_errors, uncertain=uncertain,
     )
 
 
@@ -258,6 +281,7 @@ async def run_missions_batch(
     control: RunControl,
     quiet: bool = False,
     visual: bool = False,
+    provenance: Optional[Mapping[str, Any]] = None,
     cooldown_s: float = 0,
     report_llm_factory: Callable[[], Any] = make_report_llm,
     sleep: Optional[Callable[[float], Awaitable[None]]] = None,
@@ -275,7 +299,7 @@ async def run_missions_batch(
         results.append(await run_mission(
             graphs[tier], mission,
             mission_type=tier.upper(), app_url=app_url, store=store,
-            quiet=quiet, visual=visual, control=control,
+            quiet=quiet, visual=visual, control=control, provenance=provenance,
             report_llm_factory=report_llm_factory, sleep=sleep,
         ))
 

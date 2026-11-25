@@ -102,9 +102,14 @@ The generated missions follow the standard YAML format; `_validate_missions` set
   resume from the checkpoint.
 * **`AgentState`**: A unified state `TypedDict` that carries `messages`,
   `next_agent`, `step_count`, `action_tape` (bounded to 50 entries in state; full log
-  persisted to JSONL on disk), `bugs_found`, and `explored_paths`. `messages` uses the
-  `add_messages` reducer (so `RemoveMessage` really deletes history); `bugs_found` and
-  `explored_paths` use `operator.add` and arrive as per-node **deltas**.
+  persisted to JSONL on disk), `bugs_found`, `uncertain_findings`, `bug_evidence` and
+  `explored_paths`. `messages` uses the `add_messages` reducer (so `RemoveMessage` really
+  deletes history); the other lists use `operator.add` and arrive as per-node **deltas**.
+  `bugs_found` holds **confirmed** findings only (`"title: summary"` strings); findings the
+  agent marked `uncertain` go to `uncertain_findings` and are never counted as bugs;
+  `bug_evidence` holds the observed / expected / where record of each finding. The
+  `<bugs_found>` parser, the dedup key and the contract validator live in
+  `orchestration/findings.py`.
 * **Message Summarization**: A `Summarizer` node between agents and the Supervisor
   compresses old messages to prevent unbounded state growth. Keeps the first HumanMessage
   (mission prompt) and the 20 most recent messages; the messages in between are replaced by
@@ -149,7 +154,9 @@ The generated missions follow the standard YAML format; `_validate_missions` set
 The framework is configured through three user-supplied files (templates ship as
 `*.example`):
 
-* **`.env`** — `APP_URL`, `APP_USERNAME`, `APP_PASSWORD` are required.
+* **`.env`** — `APP_URL`, `APP_USERNAME`, `APP_PASSWORD` are required. Optional:
+  `APP_REVISION` (revision of the app under test) and `AGENT_SNAPSHOT_KEEP` (per-step snapshots
+  to keep, default 200, `0` = off). `config.yaml` also takes `app.revision` and `app.seed`.
   **LLM auth** — the framework supports Claude (default) and Gemini. Claude auth: set
   `ANTHROPIC_API_KEY` (direct API), or the framework reads `~/.claude/settings.json`
   for Vertex AI config automatically. Gemini auth: set `GOOGLE_API_KEY` (API key), or
@@ -181,7 +188,9 @@ The framework is configured through three user-supplied files (templates ship as
     * `get_dom_snapshot` — read-only Accessibility Tree / JS DOM digest; does **not** write to
       the tape.
     * `generate_reproduction_spec` — translates the Action Tape into a `reproduction_*.spec.ts`
-      Playwright script.
+      Playwright script. Optional `observed` / `expected` arguments turn the last successful
+      `extract_text` step into a real `toContain` assertion. The spec header carries the tape
+      provenance and a setup check throws `SETUP_FAILURE` before the `BUG STEPS` marker.
     * Raw `PlayWrightBrowserToolkit` tools (`click_element`, `navigate_browser`, etc.) are
       **filtered out** from agents; they exist only for the monkey-patch self-healing
       mechanism.
@@ -281,9 +290,17 @@ Every mission generates artifacts localized in a `report_<thread_id>/` directory
 * `traces.log`: Full message history with tool calls and responses (each message once;
   appended, with a `=== RESUMED ===` marker, when a stopped mission is resumed).
 * `test_report.md`: An LLM-generated summary detailing actions, issues, Action Tape stats,
-  and status, plus a `Memory errors` count when a memory operation failed.
+  and status, plus a `Memory errors` count when a memory operation failed. Code (not the
+  LLM) appends the findings: confirmed bugs with Observed / Expected / Where and a separate
+  **Not determined** section.
 * `action_tape.jsonl`: Immutable, line-delimited JSON log of every deterministic browser
-  command executed (used for reproduction).
+  command executed (used for reproduction). Entries may carry `snapshot_ref`.
+* `tape_meta.json`: Provenance written once per mission (app name/URL, app revision from
+  `--app-revision` > `APP_REVISION` > `app.revision`, session start, SHA-256 of `auth.json` —
+  never its content —, tool version, `app.seed` preconditions). A sidecar on purpose, so the
+  tape itself only holds actions.
+* `snapshots/step_NNNN.txt`: The exact DOM snapshot the agent saw after each command, capped
+  per file; the last `AGENT_SNAPSHOT_KEEP` (default 200, `0` = off) are kept.
 * `reproduction_*.spec.ts`: Auto-generated Playwright TypeScript test files. Run with
   `npx playwright test reproduction_*.spec.ts --headed`.
 * `screenshots/`: Full-page screenshots captured when bugs are detected.

@@ -38,6 +38,8 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from playwright.async_api import Page
 
+from agentic_explorer.tools.browser.provenance import load_provenance
+from agentic_explorer.tools.browser.snapshots import persist_snapshot
 from agentic_explorer.utils import console
 
 # ---------------------------------------------------------
@@ -46,8 +48,29 @@ from agentic_explorer.utils import console
 _ACTION_TAPES: Dict[str, List[Dict[str, Any]]] = {}
 
 
+def _load_tape_from_disk(thread_id: str) -> List[Dict[str, Any]]:
+    """Entries already recorded for ``thread_id`` by an earlier process (a stopped or crashed run)."""
+    entries: List[Dict[str, Any]] = []
+    try:
+        with open(f"report_{thread_id}/action_tape.jsonl", "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue  # a half-written line must not lose the rest
+                if isinstance(entry, dict) and entry.get("action"):
+                    entries.append(entry)
+    except OSError:
+        pass
+    return entries
+
+
 def get_action_tape(thread_id: str) -> List[Dict[str, Any]]:
-    return _ACTION_TAPES.setdefault(thread_id, [])
+    """The thread's tape. After a restart it is reloaded from ``action_tape.jsonl``, so a resumed
+    mission keeps the steps it recorded before it was stopped (reports, specs and counts include them)."""
+    if thread_id not in _ACTION_TAPES:
+        _ACTION_TAPES[thread_id] = _load_tape_from_disk(thread_id)
+    return _ACTION_TAPES[thread_id]
 
 
 def _tape_path(thread_id: str) -> str:
@@ -474,7 +497,14 @@ def get_browser_command_tool(page: Page):
             started_at=started, duration_ms=duration_ms,
             result=res, error=err, snapshot=snap,
         )
-        _append_tape(thread_id, result.to_tape_entry())
+        # The exact view the agent is about to receive. Saved on the side and referenced
+        # from the tape, so the tape stays small and a reviewer can see what was on screen.
+        snapshot_text = _format_snapshot_for_llm(snap)
+        entry = result.to_tape_entry()
+        snapshot_ref = persist_snapshot(thread_id, snapshot_text)
+        if snapshot_ref:
+            entry["snapshot_ref"] = snapshot_ref
+        _append_tape(thread_id, entry)
 
         from agentic_explorer.ui import state_emitter
         if state_emitter.is_enabled():
@@ -496,7 +526,7 @@ def get_browser_command_tool(page: Page):
         else:
             body.append(f"ERROR: {err}  (Recoverable — try a different selector or action.)")
         body.append("DOM_SNAPSHOT:")
-        body.append(_format_snapshot_for_llm(snap))
+        body.append(snapshot_text)
         return "\n".join(body)
 
     return execute_browser_command
@@ -520,7 +550,15 @@ def _ts_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
 
 
-def _tape_entry_to_ts(entry: Dict[str, Any]) -> Optional[str]:
+def _tape_entry_to_ts(
+    entry: Dict[str, Any], *, expected: Optional[str] = None, observed: Optional[str] = None,
+) -> Optional[str]:
+    """TypeScript for one tape entry.
+
+    ``expected`` / ``observed`` only matter for ``extract_text``: with an expected value the
+    step asserts it (``toContain``); without one it keeps the weak "text exists" check and
+    leaves the observed value as a comment.
+    """
     prefix = ""
     if not entry.get("ok"):
         err = str(entry.get("error", "Unknown Error"))
@@ -551,9 +589,18 @@ def _tape_entry_to_ts(entry: Dict[str, Any]) -> Optional[str]:
             )
         return prefix + f"  await page.evaluate(() => window.scrollBy(0, {int(p.get('y', 400))}));"
     if a == "extract_text":
-        return prefix + (
+        notes = ""
+        if observed:
+            notes += f"  // observed at record time: {_comment_safe(observed)}\n"
+            if not expected:
+                notes += "  // no expected value recorded, so only the weak 'text exists' check below\n"
+        assertion = (
+            f"  expect(_t).toContain('{_ts_escape(expected)}');" if expected
+            else "  expect(_t.length).toBeGreaterThan(0);"
+        )
+        return prefix + notes + (
             f"  const _t = await page.locator('{_ts_escape(p['selector'])}').first().innerText();\n"
-            f"  expect(_t.length).toBeGreaterThan(0);"
+            + assertion
         )
     if a == "snapshot":
         return prefix + "  // snapshot (no-op in replay)"
@@ -562,14 +609,84 @@ def _tape_entry_to_ts(entry: Dict[str, Any]) -> Optional[str]:
     return prefix + f"  // unsupported action replay: {a}"
 
 
+def _comment_safe(text: Any) -> str:
+    """One line, and unable to close the surrounding block comment."""
+    return " ".join(str(text).split()).replace("*/", "* /")
+
+
+def _provenance_comment(meta: Mapping[str, Any]) -> List[str]:
+    """Header lines saying which app revision, session and starting data the tape came from."""
+    auth = meta.get("auth_state") or {}
+    sha = auth.get("sha256")
+    lines = [
+        " * Provenance:",
+        f" *   App revision: {_comment_safe(meta.get('app_revision') or 'not recorded')}",
+        f" *   Session recorded: {_comment_safe(meta.get('started_at') or 'not recorded')}",
+        f" *   auth.json sha256: {sha or 'not recorded'}"
+        + (f" (modified {_comment_safe(auth.get('modified'))})" if auth.get("modified") else ""),
+    ]
+    seed = meta.get("seed") or []
+    if seed:
+        lines.append(" *   Preconditions (starting data):")
+        lines.extend(f" *     - {_comment_safe(item)}" for item in seed)
+    return lines
+
+
+_LOGIN_PATH_TS = r"/\/(log-?in|sign-?in|auth|sso)(\/|$)/i"
+
+
+def _setup_check(base_url: Optional[str], tape: List[Dict[str, Any]]) -> List[str]:
+    """Spec block that fails with ``SETUP_FAILURE`` (not a timeout) when the session is gone.
+
+    It opens the base URL with the stored session and fails if that lands on a login page
+    the recording itself never visited. The bug steps start after the ``BUG STEPS`` marker.
+    """
+    from urllib.parse import urlparse
+
+    base = base_url
+    recorded: List[str] = []
+    for entry in tape:
+        for url in ((entry.get("params") or {}).get("url") if entry.get("action") == "navigate" else None,
+                    entry.get("page_url")):
+            if url:
+                path = urlparse(str(url)).path or "/"
+                if path not in recorded:
+                    recorded.append(path)
+                base = base or str(url)
+    if not base:
+        return ["  // --- SETUP CHECK skipped: no base URL was recorded ---", "  // --- BUG STEPS ---"]
+    return [
+        "  // --- SETUP CHECK (a failure here is NOT the bug) ---",
+        f"  const _baseUrl = '{_ts_escape(base)}';",
+        f"  const _loginPath = {_LOGIN_PATH_TS};",
+        f"  const _recordedPaths: string[] = {json.dumps(recorded)};",
+        "  try {",
+        "    await page.goto(_baseUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });",
+        "  } catch (e) {",
+        "    throw new Error('SETUP_FAILURE: cannot load ' + _baseUrl + ' - ' + (e as Error).message);",
+        "  }",
+        "  const _landedPath = new URL(page.url()).pathname;",
+        "  if (_loginPath.test(_landedPath) && !_recordedPaths.includes(_landedPath)) {",
+        "    throw new Error('SETUP_FAILURE: session expired or invalid auth.json (redirected to ' + _landedPath + ')');",
+        "  }",
+        "  // --- BUG STEPS ---",
+    ]
+
+
 def generate_playwright_spec(
     thread_id: str,
     bug_summary: str,
     app_url: Optional[str] = None,
     storage_state_path: str = "auth.json",
+    *,
+    observed: Optional[str] = None,
+    expected: Optional[str] = None,
 ) -> str:
     """Translate the recorded Action Tape into a runnable Playwright spec file.
-    Returns the absolute path of the generated .spec.ts file."""
+
+    ``observed`` / ``expected`` (what the agent saw and what it should have been) turn the
+    last successful ``extract_text`` step into a real assertion. Returns the absolute path
+    of the generated .spec.ts file."""
     tape = get_action_tape(thread_id)
     bug_summary_clean = bug_summary.replace("\n", " ").replace("*/", "* /")
     safe = re.sub(r"[^a-zA-Z0-9]", "_", bug_summary_clean)[:40].strip("_") or "bug"
@@ -577,23 +694,42 @@ def generate_playwright_spec(
     os.makedirs(out_dir, exist_ok=True)
     spec_path = os.path.join(out_dir, f"reproduction_{safe}_{int(time.time())}.spec.ts")
 
+    # The value the bug is about was read by the last successful extract_text.
+    target = max(
+        (i for i, e in enumerate(tape) if e.get("action") == "extract_text" and e.get("ok")), default=None,
+    )
     steps: List[str] = []
-    for entry in tape:
-        line = _tape_entry_to_ts(entry)
+    for i, entry in enumerate(tape):
+        line = (
+            _tape_entry_to_ts(entry, expected=expected, observed=observed) if i == target
+            else _tape_entry_to_ts(entry)
+        )
         if line:
             steps.append(line)
+    if target is None and (expected or observed):
+        # Nothing to assert against: keep the evidence as comments instead of dropping it.
+        if expected:
+            steps.append(f"  // expected: {_comment_safe(expected)}")
+        if observed:
+            steps.append(f"  // observed at record time: {_comment_safe(observed)}")
 
+    meta = load_provenance(thread_id) or {}
     header = [
         "/**",
         f" * Auto-generated reproduction for bug: {bug_summary_clean}",
         f" * Mission thread_id: {thread_id}",
         f" * Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         " *",
+        *_provenance_comment(meta),
+        " *",
         " * Prerequisites:",
         " *   npm i -D @playwright/test && npx playwright install chromium",
         f" *   Place an authenticated storage state at ./{storage_state_path}",
         " * Run:",
         " *   npx playwright test " + os.path.basename(spec_path) + " --headed",
+        " * Reading a failure:",
+        " *   SETUP_FAILURE   -> the session or starting data is not the one recorded; the bug was not reached.",
+        " *   any other error -> the steps after '--- BUG STEPS ---' ran, so the failure is the reproduction.",
         " */",
         "import { test, expect } from '@playwright/test';",
         "",
@@ -604,8 +740,9 @@ def generate_playwright_spec(
     ]
     if app_url:
         header.append(f"  // App base URL recorded at capture time: {app_url}")
+    setup = _setup_check(app_url or meta.get("app_url"), tape)
     footer = ["});", ""]
-    content = "\n".join(header + steps + footer)
+    content = "\n".join(header + setup + steps + footer)
     with open(spec_path, "w", encoding="utf-8") as f:
         f.write(content)
     return os.path.abspath(spec_path)
@@ -616,18 +753,26 @@ def generate_playwright_spec(
 # ---------------------------------------------------------
 def get_code_generator_tool(app_url: Optional[str] = None):
     @tool
-    async def generate_reproduction_spec(bug_summary: str, config: RunnableConfig) -> str:
+    async def generate_reproduction_spec(
+        bug_summary: str, config: RunnableConfig, expected: str = "", observed: str = "",
+    ) -> str:
         """Translate the immutable Action Tape into a 100%-reproducible
         Playwright .spec.ts script a developer can run locally.
 
         Call this *immediately after* `capture_bug_screenshot` so every bug has
-        both a visual evidence and an executable repro script."""
+        both a visual evidence and an executable repro script. When the bug is a
+        wrong value you read with extract_text, also pass `observed` (the exact value
+        you saw) and `expected` (what it should be): the spec then asserts the real
+        value instead of only checking that some text exists. Omit them if unsure."""
         thread_id = config.get("configurable", {}).get("thread_id", "default")
         tape = get_action_tape(thread_id)
         if not tape:
             return "No Action Tape recorded yet — nothing to translate."
         try:
-            path = generate_playwright_spec(thread_id, bug_summary, app_url=app_url)
+            path = generate_playwright_spec(
+                thread_id, bug_summary, app_url=app_url,
+                expected=expected.strip() or None, observed=observed.strip() or None,
+            )
             return f"Reproduction spec generated at {path} ({len(tape)} recorded actions)."
         except Exception as exc:
             return f"Failed to generate reproduction spec: {exc}"

@@ -11,7 +11,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import yaml
 from dotenv import load_dotenv
@@ -67,6 +67,11 @@ class AppMeta:
     name: str = "Web Application"
     url: str = ""
     description: str = ""
+    # Revision of the app under test (commit, version, build id). Optional: never guessed.
+    revision: Optional[str] = None
+    # Starting-data preconditions, copied to the tape header and the generated spec.
+    # Documentation only; nothing is executed.
+    seed: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -106,6 +111,14 @@ class AppConfig:
     paths: PathsConfig = field(default_factory=PathsConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+
+
+def _parse_seed(raw: Any) -> Tuple[str, ...]:
+    """``app.seed`` may be one string or a list of strings; blanks are dropped."""
+    if raw is None or raw == "":
+        return ()
+    items = raw if isinstance(raw, (list, tuple)) else [raw]
+    return tuple(str(item).strip() for item in items if str(item).strip())
 
 
 def _parse_runtime(raw: Mapping[str, Any]) -> RuntimeConfig:
@@ -163,6 +176,8 @@ def load_app_config(path: Optional[str | Path] = None) -> AppConfig:
             name=str(app_raw.get("name") or "Web Application"),
             url=str(app_raw.get("url") or os.getenv("APP_URL", "")),
             description=str(app_raw.get("description") or ""),
+            revision=str(app_raw["revision"]).strip() or None if app_raw.get("revision") else None,
+            seed=_parse_seed(app_raw.get("seed")),
         ),
         auth=AuthConfig(
             method=str(auth_raw.get("method") or "form"),

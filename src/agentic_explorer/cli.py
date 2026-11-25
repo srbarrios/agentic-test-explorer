@@ -25,6 +25,7 @@ class CliArgs:
     regression: bool
     export_model: bool
     visual: bool
+    app_revision: Optional[str] = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--visual", action="store_true",
         help="Launch a Streamlit dashboard for real-time visual monitoring",
+    )
+    parser.add_argument(
+        "--app-revision", type=str, default=None,
+        help="Revision of the app under test (commit, version, build id), recorded in the tape header "
+             "and in generated specs. Overrides APP_REVISION and app.revision in config.yaml",
     )
     return parser
 
