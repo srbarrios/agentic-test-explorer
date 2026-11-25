@@ -192,7 +192,7 @@ workflow.set_entry_point("nodo_a")
 app = workflow.compile()
 ```
 
-### En este proyecto: `compile_swarm()` (graph_base.py:442)
+### En este proyecto: `compile_swarm()` (`graph_base.py`)
 
 Este proyecto no usa un grafo simple, sino un **grafo ciclico** donde el Supervisor puede redirigir la ejecucion a diferentes agentes multiples veces. Veamos como se construye:
 
@@ -307,7 +307,7 @@ workflow.add_edge("new_user_agent", "Summarizer")
 En este proyecto, todos los agentes tienen una arista estatica hacia el Summarizer:
 
 ```python
-# graph_base.py:450-451
+# graph_base.py, compile_swarm()
 for agent_name in agent_names:
     workflow.add_edge(agent_name, "Summarizer")
 ```
@@ -383,7 +383,7 @@ Este proyecto implementa una **variante personalizada del patron Supervisor**. N
 - **Contexto de memoria:** Inyecta conocimiento de sesiones pasadas
 - **Contexto de exploracion:** Informa que areas ya se visitaron
 
-### El Nodo Supervisor: `make_supervisor_node()` (graph_base.py:291)
+### El Nodo Supervisor: `make_supervisor_node()` (`graph_base.py`)
 
 Veamos como funciona el supervisor paso a paso:
 
@@ -1102,7 +1102,7 @@ Este proyecto implementa un sistema de memoria inspirado en la psicologia cognit
 
 ### Organizacion por Namespaces
 
-Toda la memoria se organiza en el Store con namespaces jerarquicos (memory.py:1-14):
+Toda la memoria se organiza en el Store con namespaces jerarquicos (module docstring of `memory.py`):
 
 ```
 ("app", "{url_hash}", "pages")               # Semantica: paginas conocidas
@@ -1115,13 +1115,27 @@ Toda la memoria se organiza en el Store con namespaces jerarquicos (memory.py:1-
 ("procedures", "{url_hash}", "routing_rules")   # Procedural: reglas del supervisor
 ```
 
-El `url_hash` es un hash SHA-256 de la URL de la app (`app_url_hash()`, memory.py:25), lo que permite que la memoria sea **por aplicacion**: si testeas dos apps diferentes, cada una tiene su propia memoria.
+El `url_hash` es un hash SHA-256 de la URL de la app (`app_url_hash()`, memory.py), lo que permite que la memoria sea **por aplicacion**: si testeas dos apps diferentes, cada una tiene su propia memoria.
+
+```mermaid
+flowchart LR
+    subgraph Run[Durante la mision]
+        A[Agentes] -- record_observation, memorias semanticas --> ST[(Store)]
+        ST -- MEMORY_CONTEXT + recall_past_findings --> A
+    end
+    subgraph After[Despues de la mision]
+        EP[write_episode_memory + catalog_bug] --> ST
+        PR[update_procedural_memory] -- prompts optimizados, reglas de routing --> ST
+    end
+    ST -- prioritize_pages + generate_regression_missions --> NEXT[Siguiente sesion]
+    Run --> After
+```
 
 ### Nivel 1: Memoria Semantica (Hechos)
 
 La memoria semantica almacena **conocimiento factual** sobre la aplicacion bajo test.
 
-#### Paginas conocidas (`update_page_knowledge`, memory.py:35)
+#### Paginas conocidas (`update_page_knowledge`, memory.py)
 
 Cada vez que un agente navega exitosamente a una pagina:
 
@@ -1141,7 +1155,7 @@ Se registra:
 
 **Para que?** El Supervisor sabe que paginas ya se exploraron y puede dirigir agentes a areas no visitadas.
 
-#### Fiabilidad de selectores (`track_selector`, memory.py:61)
+#### Fiabilidad de selectores (`track_selector`, memory.py)
 
 Cada selector usado se rastrea con su tasa de exito/fallo:
 
@@ -1152,7 +1166,7 @@ await track_selector(store, url_hash, selector=".old-class-name", success=False)
 
 **Para que?** Los selectores con alta tasa de fallo indican areas fragiles de la UI.
 
-#### Quirks de la aplicacion (`record_quirk`, memory.py:94)
+#### Quirks de la aplicacion (`record_quirk`, memory.py)
 
 Comportamientos inesperados descubiertos durante el testing:
 
@@ -1170,7 +1184,7 @@ await record_quirk(
 
 La memoria episodica almacena **que paso en cada sesion de testing**.
 
-#### Resumenes de sesiones (`write_session_summary`, memory.py:203)
+#### Resumenes de sesiones (`write_session_summary`, memory.py)
 
 Al finalizar cada mision:
 
@@ -1198,7 +1212,7 @@ Se registra:
 }
 ```
 
-#### Catalogo de bugs (`catalog_bug`, memory.py:239)
+#### Catalogo de bugs (`catalog_bug`, memory.py)
 
 Los bugs se deduplicican usando un fingerprint determinista:
 
@@ -1254,7 +1268,7 @@ Avoid:
 - Testing navigation menu items — they are fully static and bug-free
 ```
 
-#### Suplementos de prompt por agente (`get_agent_prompt_supplement`, memory.py:373)
+#### Suplementos de prompt por agente (`get_agent_prompt_supplement`, memory.py)
 
 Cada agente recibe un suplemento personalizado basado en lo aprendido:
 
@@ -1268,7 +1282,7 @@ Esto hace que los agentes sean **mas inteligentes con el tiempo**: no repiten er
 
 ### Nivel 4: Priorizacion (Que testear primero)
 
-El sistema calcula un **score de riesgo** para cada pagina (memory.py:643):
+El sistema calcula un **score de riesgo** para cada pagina (`prioritize_pages()` in `memory.py`):
 
 ```python
 async def prioritize_pages(store, url_hash) -> str:
@@ -1474,7 +1488,7 @@ Ejemplos:
 
 ### Misiones de Regresion
 
-El sistema puede generar misiones automaticamente desde el catalogo de bugs (memory.py:546):
+El sistema puede generar misiones automaticamente desde el catalogo de bugs (`generate_regression_missions()` in `memory.py`):
 
 ```python
 async def generate_regression_missions(store, url_hash):
@@ -1687,6 +1701,30 @@ Otras tres capas rodean al grafo (`orchestration/resilience.py`, `runtime/drain.
 1. **Timeout por inactividad.** Cada agente y el supervisor se registran con `timeout=TimeoutPolicy(idle_timeout=...)` (`config.yaml` > `runtime.node_idle_timeout_s`, 300 s por defecto). Cualquier llamada al LLM o a una herramienta que empiece o termine dentro del nodo renueva el temporizador, asi que un turno largo pero sano nunca se corta; solo se cancela un navegador o una peticion colgados. Un nodo que agoto el tiempo se reintenta `node_retries` veces.
 2. **Manejo de fallos.** Un agente que sigue fallando se convierte en un mensaje `[NODE FAILED]` y el control vuelve al supervisor (pasando por el Summarizer), que puede elegir otro enfoque. Los errores transitorios de la API se **relanzan** a proposito, para que sigan aplicando las esperas largas de `with_retry`.
 3. **Parada limpia.** El primer Ctrl-C (o SIGTERM) llama a `RunControl.request_drain()`: el paso en curso termina, se guarda el checkpoint, se lanza `GraphDrained` y el proceso sale con estado 130. Ejecutar el mismo comando otra vez reanuda la mision sin repetir el paso ya terminado. Un segundo Ctrl-C aborta al instante.
+
+```mermaid
+flowchart TD
+    N[Se ejecuta un nodo agente o Supervisor] --> T{Inactivo mas de node_idle_timeout_s?}
+    T -- no --> OK[Actualizacion devuelta, checkpoint guardado]
+    T -- si --> R{Quedan reintentos? node_retries}
+    R -- si --> N
+    R -- no --> E{Error transitorio de la API?}
+    E -- si --> W[Se relanza: with_retry espera con backoff]
+    E -- no --> F[Mensaje NODE FAILED]
+    F --> S[Summarizer] --> SV[El Supervisor elige otro enfoque]
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Running: agent-explorer --missions ...
+    Running --> Running: un nodo termina, checkpoint guardado
+    Running --> Draining: 1er Ctrl-C / SIGTERM (request_drain)
+    Draining --> Stopped: paso actual terminado, checkpoint guardado, exit 130
+    Stopped --> Running: mismo comando otra vez (mismo thread_id) reanuda
+    Draining --> Aborted: 2o Ctrl-C
+    Running --> Reporting: el Supervisor responde FINISH
+    Reporting --> [*]: se escriben test_report.md y la memoria episodica
+```
 
 ---
 

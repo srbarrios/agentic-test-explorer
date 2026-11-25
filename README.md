@@ -123,6 +123,37 @@ graph TD
    The supervisor receives a `MEMORY_CONTEXT` section with known pages, bugs, quirks,
    agent observations, and high-risk areas on every routing cycle.
 
+### Mission Lifecycle and Node Resilience
+
+Stop with Ctrl-C at any time; the same command resumes where it left off.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Running: agent-explorer --missions ...
+    Running --> Running: node finishes, checkpoint saved
+    Running --> Draining: 1st Ctrl-C / SIGTERM (request_drain)
+    Draining --> Stopped: current step done, checkpoint saved, exit 130
+    Stopped --> Running: same command again (same thread_id) resumes
+    Draining --> Aborted: 2nd Ctrl-C
+    Running --> Reporting: Supervisor answers FINISH
+    Reporting --> [*]: test_report.md + episode memory written
+```
+
+What happens when a single node hangs or fails:
+
+```mermaid
+flowchart TD
+    N[Agent or Supervisor node runs] --> T{Idle for more than node_idle_timeout_s?}
+    T -- no --> OK[Update returned, checkpoint saved]
+    T -- yes --> R{Retries left? node_retries}
+    R -- yes --> N
+    R -- no --> E{Transient API error?}
+    E -- yes --> W[Re-raised: with_retry backs off and waits]
+    E -- no --> F[NODE FAILED message]
+    F --> S[Summarizer] --> SV[Supervisor picks another approach]
+```
+
+
 ### Source Layout
 
 - `src/agentic_explorer/main.py` — entry point: wires configuration, browser, memory and the

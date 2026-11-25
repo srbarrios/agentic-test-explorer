@@ -192,7 +192,7 @@ workflow.set_entry_point("node_a")
 app = workflow.compile()
 ```
 
-### In This Project: `compile_swarm()` (graph_base.py:442)
+### In This Project: `compile_swarm()` (`graph_base.py`)
 
 This project does not use a simple graph, but rather a **cyclic graph** where the Supervisor can redirect execution to different agents multiple times. Here is how it is built:
 
@@ -307,7 +307,7 @@ workflow.add_edge("new_user_agent", "Summarizer")
 In this project, all agents have a static edge to the Summarizer:
 
 ```python
-# graph_base.py:450-451
+# graph_base.py, compile_swarm()
 for agent_name in agent_names:
     workflow.add_edge(agent_name, "Summarizer")
 ```
@@ -383,7 +383,7 @@ This project implements a **custom variant of the Supervisor pattern**. It does 
 - **Memory context:** Injects knowledge from past sessions
 - **Exploration context:** Reports which areas have already been visited
 
-### The Supervisor Node: `make_supervisor_node()` (graph_base.py:291)
+### The Supervisor Node: `make_supervisor_node()` (`graph_base.py`)
 
 Here is how the supervisor works step by step:
 
@@ -1102,7 +1102,7 @@ This project implements a memory system inspired by human cognitive psychology, 
 
 ### Organization by Namespaces
 
-All memory is organized in the Store with hierarchical namespaces (memory.py:1-14):
+All memory is organized in the Store with hierarchical namespaces (module docstring of `memory.py`):
 
 ```
 ("app", "{url_hash}", "pages")               # Semantic: known pages
@@ -1115,13 +1115,27 @@ All memory is organized in the Store with hierarchical namespaces (memory.py:1-1
 ("procedures", "{url_hash}", "routing_rules")   # Procedural: supervisor rules
 ```
 
-The `url_hash` is a SHA-256 hash of the app URL (`app_url_hash()`, memory.py:25), which ensures that memory is **per application**: if you test two different apps, each one has its own memory.
+The `url_hash` is a SHA-256 hash of the app URL (`app_url_hash()`, memory.py), which ensures that memory is **per application**: if you test two different apps, each one has its own memory.
+
+```mermaid
+flowchart LR
+    subgraph Run[During a mission]
+        A[Agents] -- record_observation, write semantic memories --> ST[(Store)]
+        ST -- MEMORY_CONTEXT + recall_past_findings --> A
+    end
+    subgraph After[After the mission]
+        EP[write_episode_memory + catalog_bug] --> ST
+        PR[update_procedural_memory] -- optimized prompts, routing rules --> ST
+    end
+    ST -- prioritize_pages + generate_regression_missions --> NEXT[Next session]
+    Run --> After
+```
 
 ### Level 1: Semantic Memory (Facts)
 
 Semantic memory stores **factual knowledge** about the application under test.
 
-#### Known pages (`update_page_knowledge`, memory.py:35)
+#### Known pages (`update_page_knowledge`, memory.py)
 
 Every time an agent successfully navigates to a page:
 
@@ -1141,7 +1155,7 @@ It records:
 
 **What for?** The Supervisor knows which pages have already been explored and can direct agents to unvisited areas.
 
-#### Selector reliability (`track_selector`, memory.py:61)
+#### Selector reliability (`track_selector`, memory.py)
 
 Each selector used is tracked with its success/failure rate:
 
@@ -1152,7 +1166,7 @@ await track_selector(store, url_hash, selector=".old-class-name", success=False)
 
 **What for?** Selectors with a high failure rate indicate fragile areas of the UI.
 
-#### Application quirks (`record_quirk`, memory.py:94)
+#### Application quirks (`record_quirk`, memory.py)
 
 Unexpected behaviors discovered during testing:
 
@@ -1170,7 +1184,7 @@ await record_quirk(
 
 Episodic memory stores **what happened in each testing session**.
 
-#### Session summaries (`write_session_summary`, memory.py:203)
+#### Session summaries (`write_session_summary`, memory.py)
 
 At the end of each mission:
 
@@ -1198,7 +1212,7 @@ It records:
 }
 ```
 
-#### Bug catalog (`catalog_bug`, memory.py:239)
+#### Bug catalog (`catalog_bug`, memory.py)
 
 Bugs are deduplicated using a deterministic fingerprint:
 
@@ -1254,7 +1268,7 @@ Avoid:
 - Testing navigation menu items — they are fully static and bug-free
 ```
 
-#### Per-agent prompt supplements (`get_agent_prompt_supplement`, memory.py:373)
+#### Per-agent prompt supplements (`get_agent_prompt_supplement`, memory.py)
 
 Each agent receives a personalized supplement based on what was learned:
 
@@ -1268,7 +1282,7 @@ This makes agents **smarter over time**: they do not repeat mistakes from past s
 
 ### Level 4: Prioritization (What to Test First)
 
-The system calculates a **risk score** for each page (memory.py:643):
+The system calculates a **risk score** for each page (`prioritize_pages()` in `memory.py`):
 
 ```python
 async def prioritize_pages(store, url_hash) -> str:
@@ -1474,7 +1488,7 @@ Examples:
 
 ### Regression Missions
 
-The system can automatically generate missions from the bug catalog (memory.py:546):
+The system can automatically generate missions from the bug catalog (`generate_regression_missions()` in `memory.py`):
 
 ```python
 async def generate_regression_missions(store, url_hash):
@@ -1687,6 +1701,30 @@ Three more layers sit around the graph (`orchestration/resilience.py`, `runtime/
 1. **Idle timeout.** Every agent and the supervisor are registered with `timeout=TimeoutPolicy(idle_timeout=...)` (`config.yaml` > `runtime.node_idle_timeout_s`, 300 s by default). Any LLM or tool call starting or finishing inside the node renews the timer, so a long but healthy turn is never cut; only a hung browser or request is cancelled. A node that timed out is retried `node_retries` times.
 2. **Failure handler.** An agent that still fails becomes a `[NODE FAILED]` message and control returns to the supervisor (through the Summarizer), which can pick another approach. Transient API errors are deliberately **re-raised** instead, so the long waits of `with_retry` still apply.
 3. **Graceful stop.** The first Ctrl-C (or SIGTERM) calls `RunControl.request_drain()`: the step in progress finishes, the checkpoint is saved, `GraphDrained` is raised and the process exits with status 130. Running the same command again resumes the mission without repeating the finished step. A second Ctrl-C aborts immediately.
+
+```mermaid
+flowchart TD
+    N[Agent or Supervisor node runs] --> T{Idle for more than node_idle_timeout_s?}
+    T -- no --> OK[Update returned, checkpoint saved]
+    T -- yes --> R{Retries left? node_retries}
+    R -- yes --> N
+    R -- no --> E{Transient API error?}
+    E -- yes --> W[Re-raised: with_retry backs off and waits]
+    E -- no --> F[NODE FAILED message]
+    F --> S[Summarizer] --> SV[Supervisor picks another approach]
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Running: agent-explorer --missions ...
+    Running --> Running: node finishes, checkpoint saved
+    Running --> Draining: 1st Ctrl-C / SIGTERM (request_drain)
+    Draining --> Stopped: current step done, checkpoint saved, exit 130
+    Stopped --> Running: same command again (same thread_id) resumes
+    Draining --> Aborted: 2nd Ctrl-C
+    Running --> Reporting: Supervisor answers FINISH
+    Reporting --> [*]: test_report.md + episode memory written
+```
 
 ---
 
