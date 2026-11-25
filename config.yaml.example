@@ -35,3 +35,19 @@ llm:
   # claude_vision_model: claude-haiku-4-5
   # gemini_model: gemini-3.1-flash-lite
   # gemini_vision_model: gemini-3.1-flash-lite
+
+# Resilience of the agent graph (optional — the defaults shown are used when omitted).
+#
+# A node that shows no activity (no LLM or tool call starting or finishing) for
+# node_idle_timeout_s is considered hung and is cancelled. Any activity renews the
+# timer, so a long but healthy agent turn is never cut. A node that timed out is
+# retried node_retries times; if it still fails, the supervisor is told and picks
+# another approach. API errors (429/503/529) are retried separately, with waits.
+# A value of 0 disables a timeout.
+#
+# Press Ctrl-C once to stop at a safe point (the current step finishes and the
+# mission can be resumed by running the same command again); twice to abort now.
+runtime:
+  # node_idle_timeout_s: 300
+  # node_run_timeout_s: 0     # hard cap per attempt, regardless of activity
+  # node_retries: 1

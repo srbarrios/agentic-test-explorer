@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 from langgraph.store.memory import InMemoryStore
 
-from agentic_explorer.config import AppMeta
+from agentic_explorer.config import AppMeta, RuntimeConfig
 from agentic_explorer.memory import app_url_hash
 from agentic_explorer.orchestration import advanced_graph, standard_graph
 from agentic_explorer.orchestration import graph as graph_module
@@ -120,3 +120,27 @@ async def test_legacy_advanced_wrapper_matches_and_warns(capture, variant):
 async def test_unknown_tier_is_rejected(capture):
     with pytest.raises(ValueError, match="tier must be 'standard' or 'advanced'"):
         await build_graph(BASE_TOOLS, object(), None, FULL, tier="legacy")
+
+
+@pytest.mark.parametrize("tier", ["standard", "advanced"])
+async def test_runtime_policies_are_applied_to_every_node(capture, tier):
+    runtime = RuntimeConfig(node_idle_timeout_s=42, node_run_timeout_s=0, node_retries=2)
+
+    compiled = await build_graph(BASE_TOOLS, object(), None, FULL, tier=tier, runtime=runtime)
+
+    for name in GOLDEN["full"][tier]["agent_names"]:
+        node = compiled.nodes[name]
+        assert node.timeout.idle_timeout == 42.0, name
+        assert node.timeout.run_timeout is None, name
+        assert node.retry_policy[0].max_attempts == 3, name  # 2 retries = 3 attempts
+        assert node.error_handler_node is not None, name  # failures go back to the supervisor
+
+    supervisor = compiled.nodes["Supervisor"]
+    assert supervisor.timeout.idle_timeout == 42.0
+    assert supervisor.error_handler_node is None  # a failing supervisor must fail the run
+
+
+async def test_default_runtime_policies_apply_when_none_is_given(capture):
+    compiled = await build_graph(BASE_TOOLS, object(), None, FULL, tier="standard")
+
+    assert compiled.nodes["new_user_agent"].timeout.idle_timeout == RuntimeConfig().node_idle_timeout_s

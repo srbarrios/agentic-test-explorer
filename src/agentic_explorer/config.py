@@ -87,11 +87,48 @@ class LLMConfig:
 
 
 @dataclass
+class RuntimeConfig:
+    """Resilience limits for graph nodes. A value of 0 disables a timeout."""
+
+    # No activity at all (no LLM or tool call starting or finishing) for this long
+    # means the node is hung. Activity renews it, so long healthy turns are safe.
+    node_idle_timeout_s: float = 300.0
+    # Hard cap on a single node attempt, regardless of activity (0 = none).
+    node_run_timeout_s: float = 0.0
+    # Extra attempts for a node that timed out (attempts = retries + 1).
+    node_retries: int = 1
+
+
+@dataclass
 class AppConfig:
     app: AppMeta = field(default_factory=AppMeta)
     auth: AuthConfig = field(default_factory=AuthConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+
+
+def _parse_runtime(raw: Mapping[str, Any]) -> RuntimeConfig:
+    """Read the ``runtime:`` section, rejecting negative or non-numeric values."""
+    defaults = RuntimeConfig()
+
+    def number(key: str, default, kind):
+        value = raw.get(key)
+        if value is None or value == "":
+            return default
+        try:
+            parsed = kind(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"runtime.{key} must be a number, got {value!r}") from None
+        if parsed < 0:
+            raise ValueError(f"runtime.{key} must be >= 0, got {parsed}")
+        return parsed
+
+    return RuntimeConfig(
+        node_idle_timeout_s=number("node_idle_timeout_s", defaults.node_idle_timeout_s, float),
+        node_run_timeout_s=number("node_run_timeout_s", defaults.node_run_timeout_s, float),
+        node_retries=number("node_retries", defaults.node_retries, int),
+    )
 
 
 def load_app_config(path: Optional[str | Path] = None) -> AppConfig:
@@ -119,6 +156,7 @@ def load_app_config(path: Optional[str | Path] = None) -> AppConfig:
     auth_raw = raw.get("auth", {}) or {}
     paths_raw = raw.get("paths", {}) or {}
     llm_raw = raw.get("llm", {}) or {}
+    runtime_raw = raw.get("runtime", {}) or {}
 
     return AppConfig(
         app=AppMeta(
@@ -144,4 +182,5 @@ def load_app_config(path: Optional[str | Path] = None) -> AppConfig:
             embedding_model=llm_raw.get("embedding_model") or None,
             embedding_dims=int(llm_raw["embedding_dims"]) if llm_raw.get("embedding_dims") else None,
         ),
+        runtime=_parse_runtime(runtime_raw),
     )

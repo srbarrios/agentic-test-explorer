@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import atexit
 import os
-import signal
 import subprocess
 import time
 import webbrowser
@@ -20,8 +19,7 @@ _DASHBOARD_PATH = os.path.join(os.path.dirname(__file__), "dashboard.py")
 def start_dashboard(*, app_url: str, provider: str, model_name: str) -> subprocess.Popen:
     """Reset Visual Mode state, launch Streamlit and open it in the browser.
 
-    The process is terminated at interpreter exit and on Ctrl-C (the previous
-    SIGINT handler still runs afterwards).
+    The process is terminated when the interpreter exits.
     """
     # Clear any stale state from previous runs.
     state_emitter.cleanup()
@@ -38,15 +36,9 @@ def start_dashboard(*, app_url: str, provider: str, model_name: str) -> subproce
         stderr=subprocess.DEVNULL,
     )
 
+    # Ctrl-C is handled by runtime/drain.py (stop at a safe point), so the dashboard
+    # only needs to be stopped when the process exits, however that happens.
     atexit.register(stop_dashboard, proc)
-    previous_handler = signal.getsignal(signal.SIGINT)
-
-    def _on_sigint(sig, frame):
-        stop_dashboard(proc)
-        if callable(previous_handler):
-            previous_handler(sig, frame)
-
-    signal.signal(signal.SIGINT, _on_sigint)
     console.success("Visual Mode dashboard launched (Streamlit)")
 
     # Give Streamlit a moment to start, then open the browser.

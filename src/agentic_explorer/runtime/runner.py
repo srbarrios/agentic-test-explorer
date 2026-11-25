@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
+from langgraph.errors import GraphDrained
+from langgraph.runtime import RunControl
 
 from agentic_explorer.memory import app_url_hash, write_episode_memory
 from agentic_explorer.orchestration.graph_base import dedupe_bugs
@@ -61,10 +64,12 @@ async def stream_mission(
     initial_state: Optional[Dict[str, Any]],
     quiet: bool,
     visual: bool,
+    control: Optional[RunControl] = None,
 ) -> None:
     """Stream the graph once, printing ReAct lines and appending to ``traces.log``.
 
-    ``initial_state=None`` resumes from the thread's saved checkpoint.
+    ``initial_state=None`` resumes from the thread's saved checkpoint. If ``control``
+    is drained the graph stops at the next step boundary and raises ``GraphDrained``.
     """
     seen_message_ids: set[str] = set()
     trace_path = os.path.join(report_dir(thread_id), "traces.log")
@@ -75,6 +80,7 @@ async def stream_mission(
         initial_state,
         config=run_config,
         stream_mode=["updates", "messages"],
+        control=control,
     ):
         if mode == "updates":
             # payload: {node_name: state_update}
@@ -164,6 +170,7 @@ async def run_mission(
     store,
     quiet: bool = False,
     visual: bool = False,
+    control: Optional[RunControl] = None,
     report_llm_factory: Callable[[], Any] = make_report_llm,
     sleep: Optional[Callable[[float], Awaitable[None]]] = None,
 ) -> MissionResult:
@@ -171,7 +178,9 @@ async def run_mission(
 
     Transient API errors are retried (resuming from the checkpoint). Afterwards the
     LLM report is written to ``report_<thread_id>/test_report.md`` and the episode
-    is stored in long-term memory.
+    is stored in long-term memory. If ``control`` is drained, ``GraphDrained``
+    propagates (no retry, no report): the checkpoint is saved and running the same
+    mission again resumes it.
     """
     thread_id = str(mission["thread_id"])
     prompt = mission["prompt"]
@@ -196,14 +205,17 @@ async def run_mission(
         state_emitter.start_mission(thread_id, prompt, mission_type)
         state_emitter.emit()
 
-    os.makedirs(report_dir(thread_id), exist_ok=True)
-    with open(os.path.join(report_dir(thread_id), "traces.log"), "w", encoding="utf-8") as f:
-        f.write(f"=== TRACES: {thread_id} ===\n")
-
     run_config = {"configurable": {"thread_id": thread_id}}
     existing_state = await graph.aget_state(run_config)
+    resuming = bool(existing_state.values)
 
-    resume = {"initial_state": None if existing_state.values else _initial_state(prompt)}
+    os.makedirs(report_dir(thread_id), exist_ok=True)
+    trace_path = os.path.join(report_dir(thread_id), "traces.log")
+    # A resumed mission (after a stop or a crash) keeps the trace of its first half.
+    with open(trace_path, "a" if resuming else "w", encoding="utf-8") as f:
+        f.write(f"\n=== RESUMED: {thread_id} ===\n" if resuming else f"=== TRACES: {thread_id} ===\n")
+
+    resume = {"initial_state": None if resuming else _initial_state(prompt)}
 
     def _resume_from_checkpoint(_attempt: int, _exc: Exception) -> None:
         resume["initial_state"] = None  # retries resume from the saved checkpoint
@@ -211,7 +223,7 @@ async def run_mission(
     await with_retry(
         lambda: stream_mission(
             graph, thread_id=thread_id, initial_state=resume["initial_state"],
-            quiet=quiet, visual=visual,
+            quiet=quiet, visual=visual, control=control,
         ),
         on_retry=_resume_from_checkpoint,
         sleep=sleep,
@@ -243,3 +255,47 @@ async def run_mission(
 
     append_action_tape_summary(thread_id, tape_len=len(tape), bugs_count=len(bugs_found))
     return MissionResult(thread_id=thread_id, bugs=bugs_found, paths=explored_paths, tape_len=len(tape))
+
+
+def _raise_if_drained(control: RunControl) -> None:
+    if control.drain_requested:
+        raise GraphDrained(control.drain_reason or "shutdown")
+
+
+async def run_missions_batch(
+    graphs: Mapping[str, Any],
+    missions: Sequence[Mission],
+    tiers: Sequence[str],
+    *,
+    app_url: str,
+    store,
+    control: RunControl,
+    quiet: bool = False,
+    visual: bool = False,
+    cooldown_s: float = 0,
+    report_llm_factory: Callable[[], Any] = make_report_llm,
+    sleep: Optional[Callable[[float], Awaitable[None]]] = None,
+) -> List[MissionResult]:
+    """Run ``missions`` one after another, each on the graph of its tier.
+
+    Raises ``GraphDrained`` as soon as a drain was requested: before starting a
+    mission and before waiting out the cooldown, so a stop never has to sit through it.
+    A mission interrupted by the drain keeps its checkpoint and resumes on the next run.
+    """
+    do_sleep = sleep or asyncio.sleep
+    results: List[MissionResult] = []
+    for index, (mission, tier) in enumerate(zip(missions, tiers)):
+        _raise_if_drained(control)
+        results.append(await run_mission(
+            graphs[tier], mission,
+            mission_type=tier.upper(), app_url=app_url, store=store,
+            quiet=quiet, visual=visual, control=control,
+            report_llm_factory=report_llm_factory, sleep=sleep,
+        ))
+
+        if index < len(missions) - 1:
+            _raise_if_drained(control)
+            if cooldown_s > 0:
+                console.info(f"Cooling down {cooldown_s:g}s before next mission...")
+                await do_sleep(cooldown_s)
+    return results

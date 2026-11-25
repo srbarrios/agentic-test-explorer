@@ -7,7 +7,7 @@ from langchain_core.messages import SystemMessage
 from langgraph.graph import StateGraph
 from playwright.async_api import Page
 
-from agentic_explorer.config import AppMeta
+from agentic_explorer.config import AppMeta, RuntimeConfig
 from agentic_explorer.memory import (
     app_url_hash,
     get_agent_prompt_supplement,
@@ -24,6 +24,7 @@ from agentic_explorer.orchestration.graph_base import (
     make_supervisor_node,
 )
 from agentic_explorer.orchestration.personas import Tier, describe_personas, personas_for_tier
+from agentic_explorer.orchestration.resilience import agent_node_options, supervisor_node_options
 from agentic_explorer.tools.browser.engine import (
     get_browser_command_tool,
     get_code_generator_tool,
@@ -42,6 +43,7 @@ async def build_graph(
     max_steps: int = 30,
     quiet: bool = False,
     store=None,
+    runtime: RuntimeConfig | None = None,
 ):
     """Build the swarm for ``tier``: the personas of that tier, a supervisor and a summarizer.
 
@@ -54,7 +56,9 @@ async def build_graph(
             plus the autonomous explorer).
         max_steps: Supervisor reset threshold.
         store: Optional LangGraph Store for cross-session memory.
+        runtime: Node timeouts and retries (``config.yaml`` ``runtime:``); defaults apply if omitted.
     """
+    runtime = runtime or RuntimeConfig()
     personas = personas_for_tier(tier)
     llm = make_llm(temperature=0)
 
@@ -91,8 +95,13 @@ async def build_graph(
     workflow.add_node(  # type: ignore[arg-type]
         "Supervisor",
         make_supervisor_node(llm, tuple(agent_registry), app_url, max_steps, agent_descriptions, app_url_hash=url_hash),
+        **supervisor_node_options(runtime),
     )
     for name, agent in agent_registry.items():
-        workflow.add_node(name, make_agent_node(agent, name=name, quiet=quiet, app_url_hash=url_hash))  # type: ignore[arg-type]
+        workflow.add_node(  # type: ignore[arg-type]
+            name,
+            make_agent_node(agent, name=name, quiet=quiet, app_url_hash=url_hash),
+            **agent_node_options(runtime),
+        )
 
     return compile_swarm(workflow, agent_registry, checkpointer, store=store)

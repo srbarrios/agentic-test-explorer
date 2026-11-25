@@ -1,7 +1,7 @@
 """Tests for ``agentic_explorer.ui.launcher`` (Streamlit dashboard lifecycle).
 
-Everything external (subprocess, browser, signals, sleeping) is patched so no
-real dashboard starts and the test process keeps its own SIGINT handler.
+Everything external (subprocess, browser, sleeping) is patched so no real
+dashboard starts.
 """
 
 import subprocess
@@ -41,9 +41,8 @@ class _FakeEmitter:
 
 @pytest.fixture
 def env(monkeypatch):
-    rec = {"popen": [], "atexit": [], "sleeps": [], "urls": [], "signals": [], "proc": _FakeProc()}
+    rec = {"popen": [], "atexit": [], "sleeps": [], "urls": [], "proc": _FakeProc()}
     rec["emitter"] = _FakeEmitter()
-    previous = []  # what the SIGINT handler chains to
 
     def popen(cmd, **kwargs):
         rec["popen"].append((cmd, kwargs))
@@ -54,9 +53,6 @@ def env(monkeypatch):
     monkeypatch.setattr(launcher.atexit, "register", lambda fn, *a: rec["atexit"].append((fn, a)))
     monkeypatch.setattr(launcher.time, "sleep", lambda s: rec["sleeps"].append(s))
     monkeypatch.setattr(launcher.webbrowser, "open", lambda url: rec["urls"].append(url))
-    monkeypatch.setattr(launcher.signal, "getsignal", lambda sig: (lambda s, f: previous.append("chained")))
-    monkeypatch.setattr(launcher.signal, "signal", lambda sig, handler: rec["signals"].append((sig, handler)))
-    rec["previous"] = previous
     return rec
 
 
@@ -94,14 +90,18 @@ def test_start_registers_cleanup_at_exit(env):
     assert env["atexit"] == [(stop_dashboard, (proc,))]
 
 
-def test_sigint_handler_stops_dashboard_and_chains_to_previous_handler(env):
+def test_start_leaves_signal_handling_to_the_drain_handlers(env, monkeypatch):
+    # Ctrl-C now means "stop at a safe point" (runtime/drain.py). If the dashboard
+    # killed itself on the first Ctrl-C, the live view would vanish mid-step.
+    import signal
+
+    installed = []
+    monkeypatch.setattr(signal, "signal", lambda sig, handler: installed.append(sig))
+
     start_dashboard(app_url="u", provider="p", model_name="m")
 
-    (sig, handler), = env["signals"]
-    handler(sig, None)
-
-    assert env["proc"].terminated is True
-    assert env["previous"] == ["chained"]
+    assert installed == []
+    assert env["atexit"], "the dashboard is still stopped when the process exits"
 
 
 def test_stop_terminates_a_running_dashboard():

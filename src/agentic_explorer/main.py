@@ -4,6 +4,8 @@ import warnings
 from typing import Any, Optional
 
 from langchain_core._api.deprecation import LangChainPendingDeprecationWarning
+from langgraph.errors import GraphDrained
+from langgraph.runtime import RunControl
 
 # Suppress library warnings before any imports that trigger them.
 warnings.filterwarnings(
@@ -21,8 +23,9 @@ from agentic_explorer.config import AppConfig, load_app_config, load_environment
 from agentic_explorer.memory_admin import DEFAULT_DB  # noqa: E402
 from agentic_explorer.orchestration.graph import build_graph  # noqa: E402
 from agentic_explorer.orchestration.personas import resolve_tier  # noqa: E402
+from agentic_explorer.runtime.drain import install_drain_handlers  # noqa: E402
 from agentic_explorer.runtime.missions import resolve_missions  # noqa: E402
-from agentic_explorer.runtime.runner import run_mission  # noqa: E402
+from agentic_explorer.runtime.runner import run_missions_batch  # noqa: E402
 from agentic_explorer.tools.common.custom_tools import (  # noqa: E402
     fetch_agent_skill,
     get_mcp_tools,
@@ -141,25 +144,24 @@ async def run_missions():
             tier: await build_graph(
                 base_tools, active_page, memory_saver, cfg.app,
                 tier=tier, max_steps=cli.max_steps, quiet=cli.quiet, store=memory_store,
+                runtime=cfg.runtime,
             )
             for tier in ("standard", "advanced")
         }
         console.success("Ready")
 
-        for mission, tier in zip(missions, tiers):
-            await run_mission(
-                graphs[tier],
-                mission,
-                mission_type=tier.upper(),
-                app_url=cfg.app.url,
-                store=memory_store,
-                quiet=cli.quiet,
-                visual=cli.visual,
+        # Ctrl-C / SIGTERM stop the batch at a safe point (GraphDrained); running the
+        # same command again resumes the interrupted mission from its checkpoint.
+        control = RunControl()
+        uninstall_drain_handlers = install_drain_handlers(control)
+        try:
+            await run_missions_batch(
+                graphs, missions, tiers,
+                app_url=cfg.app.url, store=memory_store, control=control,
+                quiet=cli.quiet, visual=cli.visual, cooldown_s=mission_cooldown,
             )
-
-            if mission_cooldown > 0 and mission != missions[-1]:
-                console.info(f"Cooling down {mission_cooldown}s before next mission...")
-                await asyncio.sleep(mission_cooldown)
+        finally:
+            uninstall_drain_handlers()
 
         # Post-batch: update procedural memory via LLM reflection
         try:
@@ -181,7 +183,14 @@ async def run_missions():
 
 
 def main():
-    asyncio.run(run_missions())
+    try:
+        asyncio.run(run_missions())
+    except GraphDrained as drained:
+        console.warn(
+            f"Stopped ({drained.reason}) at a safe point. "
+            "Run the same command again to resume the interrupted mission."
+        )
+        raise SystemExit(130) from None
 
 
 if __name__ == "__main__":

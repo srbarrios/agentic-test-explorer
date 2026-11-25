@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agentic_explorer.config import AppConfig, _interpolate, load_app_config
+from agentic_explorer.config import AppConfig, RuntimeConfig, _interpolate, load_app_config
 
 
 class ConfigTests(unittest.TestCase):
@@ -105,6 +105,71 @@ llm:
 
         self.assertEqual(cfg.paths.mcp_servers, "/env/mcp.json")
         self.assertEqual(cfg.paths.skills_root, "/env/skills")
+
+    def test_runtime_defaults_when_file_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            cfg = load_app_config(Path(tmp) / "missing.yaml")
+
+        self.assertEqual(
+            cfg.runtime,
+            RuntimeConfig(node_idle_timeout_s=300.0, node_run_timeout_s=0.0, node_retries=1),
+        )
+
+    def test_runtime_defaults_when_section_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text("app:\n  name: X\n", encoding="utf-8")
+
+            cfg = load_app_config(config_path)
+
+        self.assertEqual(cfg.runtime, RuntimeConfig())
+
+    def test_runtime_section_is_parsed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text(
+                "runtime:\n  node_idle_timeout_s: 90\n  node_run_timeout_s: 1200.5\n  node_retries: 3\n",
+                encoding="utf-8",
+            )
+
+            cfg = load_app_config(config_path)
+
+        self.assertEqual(cfg.runtime.node_idle_timeout_s, 90.0)
+        self.assertEqual(cfg.runtime.node_run_timeout_s, 1200.5)
+        self.assertEqual(cfg.runtime.node_retries, 3)
+
+    def test_runtime_zero_disables_a_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text("runtime:\n  node_idle_timeout_s: 0\n", encoding="utf-8")
+
+            cfg = load_app_config(config_path)
+
+        self.assertEqual(cfg.runtime.node_idle_timeout_s, 0.0)
+
+    def test_runtime_values_support_env_interpolation(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"IDLE": "45"}, clear=False):
+            os.chdir(tmp)
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text("runtime:\n  node_idle_timeout_s: ${IDLE}\n", encoding="utf-8")
+
+            cfg = load_app_config(config_path)
+
+        self.assertEqual(cfg.runtime.node_idle_timeout_s, 45.0)
+
+    def test_runtime_rejects_negative_and_non_numeric_values(self):
+        for body in ("node_idle_timeout_s: -1", "node_run_timeout_s: -5", "node_retries: -1", "node_retries: lots"):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as tmp:
+                os.chdir(tmp)
+                config_path = Path(tmp) / "config.yaml"
+                config_path.write_text(f"runtime:\n  {body}\n", encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, "runtime"):
+                    load_app_config(config_path)
 
 
 if __name__ == "__main__":
