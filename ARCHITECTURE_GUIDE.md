@@ -937,6 +937,15 @@ flowchart TD
 
 Limits worth knowing: the redirect check recognises login pages by path (`/login`, `/signin`, `/sso`, `/auth`), so an app whose login lives at `/` is not detected. The recommended habit is to **run the spec once in a clean session before reporting a bug**; the framework does not do that for you.
 
+### An Expired Session Stops the Mission
+
+If `auth.json` was loaded and the saved session expires, the app redirects to a login page. Without a check the agent would explore the login form as if it were the application and report it as a bug. `tools/browser/session.py` looks at every command's outcome and answers `STATUS: AUTH_REQUIRED` when:
+
+* the page landed on a login path (`/login`, `/signin`, `/sso`, `/auth`), or
+* it shows a password field right after the page changed, on a path that is not about passwords or accounts (`/settings`, `/profile`, `/register`, ...), which covers apps whose login lives at `/`.
+
+It does not fire when no session was loaded, when the agent navigated to a login URL on purpose, or when it already typed a password itself (it is logging in). On detection the tape entry gets `"auth_required": true`, the agent is told to end its turn with `<bugs_found>[]</bugs_found>`, and the run is drained with the same mechanism as Ctrl-C: the current step finishes, the checkpoint is saved and the process exits with status 130. Run `agent-auth` and then the same command again; the mission resumes with its tape. `tape_meta.json` keeps the fingerprint of the first run in `auth_state` and appends each later, different `auth.json` to `auth_history` (hash and modification time only). There is no live re-authentication inside a running mission and no 2FA automation: `agent-auth` waits 15 s for the post-login selector.
+
 ### What the Agent Saw: Step Snapshots
 
 After every command the engine shows the agent a compact DOM / accessibility snapshot. That exact text is saved as `report_<thread_id>/snapshots/step_NNNN.txt`, and the tape entry only carries `"snapshot_ref": "snapshots/step_0003.txt"`, so `action_tape.jsonl` stays small. Each snapshot is capped at 12,000 characters and only the last `AGENT_SNAPSHOT_KEEP` (default 200) are kept; `AGENT_SNAPSHOT_KEEP=0` turns the feature off. A reference to a pruned step points to a file that no longer exists.

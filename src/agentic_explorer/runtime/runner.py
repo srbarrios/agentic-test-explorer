@@ -26,7 +26,7 @@ from agentic_explorer.reporting import (
 from agentic_explorer.runtime.retry import with_retry
 from agentic_explorer.runtime.tracing import TraceWriter
 from agentic_explorer.tools.browser.engine import get_action_tape
-from agentic_explorer.tools.browser.provenance import write_provenance
+from agentic_explorer.tools.browser.provenance import record_auth_if_changed, write_provenance
 from agentic_explorer.ui import state_emitter
 from agentic_explorer.utils import console
 from agentic_explorer.utils.messages import message_text
@@ -200,6 +200,7 @@ async def run_mission(
     if provenance is not None:
         # Written once: a resumed mission keeps the header of its first run.
         write_provenance(thread_id, **provenance)
+        record_auth_if_changed(thread_id)  # a resume after re-authenticating
     trace_path = os.path.join(report_dir(thread_id), "traces.log")
     # A resumed mission (after a stop or a crash) keeps the trace of its first half.
     with open(trace_path, "a" if resuming else "w", encoding="utf-8") as f:

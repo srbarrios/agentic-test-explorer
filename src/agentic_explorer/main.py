@@ -27,6 +27,7 @@ from agentic_explorer.orchestration.personas import resolve_tier  # noqa: E402
 from agentic_explorer.runtime.drain import install_drain_handlers  # noqa: E402
 from agentic_explorer.runtime.missions import resolve_missions  # noqa: E402
 from agentic_explorer.runtime.runner import run_missions_batch  # noqa: E402
+from agentic_explorer.tools.browser import session  # noqa: E402
 from agentic_explorer.tools.browser.provenance import resolve_app_revision  # noqa: E402
 from agentic_explorer.tools.common.custom_tools import (  # noqa: E402
     fetch_agent_skill,
@@ -156,6 +157,8 @@ async def run_missions():
         # same command again resumes the interrupted mission from its checkpoint.
         control = RunControl()
         uninstall_drain_handlers = install_drain_handlers(control)
+        # An expired auth.json stops the run at a safe point instead of testing a login page.
+        session.arm(expected=os.path.exists("auth.json"), control=control)
         try:
             await run_missions_batch(
                 graphs, missions, tiers,
@@ -195,10 +198,16 @@ def main():
     try:
         asyncio.run(run_missions())
     except GraphDrained as drained:
-        console.warn(
-            f"Stopped ({drained.reason}) at a safe point. "
-            "Run the same command again to resume the interrupted mission."
-        )
+        if drained.reason == session.DRAIN_REASON:
+            console.warn(
+                "The saved session (auth.json) has expired. Run `agent-auth` to sign in again, then run "
+                "the same command to resume the interrupted mission (its steps are kept)."
+            )
+        else:
+            console.warn(
+                f"Stopped ({drained.reason}) at a safe point. "
+                "Run the same command again to resume the interrupted mission."
+            )
         raise SystemExit(130) from None
 
 
