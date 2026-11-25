@@ -28,6 +28,9 @@ import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agentic_explorer.config import AppMeta
+from agentic_explorer.memory_health import guarded
+from agentic_explorer.orchestration.personas import ALL_KEYWORDS, tier_for_thread_id
+from agentic_explorer.runtime.retry import is_transient_error
 from agentic_explorer.utils import console
 from agentic_explorer.utils.llm import make_llm
 from agentic_explorer.utils.llm_json import extract_yaml_text
@@ -40,24 +43,8 @@ PR_PROMPT_BODY_BUDGET_CHARS = int(os.getenv("PR_PROMPT_BODY_BUDGET_CHARS", "8000
 PR_PROMPT_FILE_LIST_LIMIT = int(os.getenv("PR_PROMPT_FILE_LIST_LIMIT", "80"))
 PR_GENERATED_MISSION_PROMPT_MAX_CHARS = int(os.getenv("PR_GENERATED_MISSION_PROMPT_MAX_CHARS", "1200"))
 
-_ALLOWED_PR_AGENT_KEYWORDS = (
-    "new_user",
-    "power_user",
-    "adversarial_user",
-    "accessibility_user",
-    "accessibility",
-    "a11y",
-    "data_heavy_user",
-    "data_heavy",
-    "data-heavy",
-    "impatient_user",
-    "impatient",
-    "returning_user",
-    "returning",
-    "explorer",
-    "chaos",
-    "autonomous",
-)
+# Thread-id substrings that name a known persona; derived from the persona registry.
+_ALLOWED_PR_AGENT_KEYWORDS = ALL_KEYWORDS
 _DELETED_PR_AGENT_KEYWORDS = (
     "listing",
     "graph",
@@ -522,12 +509,27 @@ def _validate_missions(data: Any, pr_number: int) -> dict:
             raise ValueError(f"Mission {i} uses a deleted agent in thread_id: {m['thread_id']}")
         if not any(keyword in thread_id for keyword in _ALLOWED_PR_AGENT_KEYWORDS):
             raise ValueError(f"Mission {i} does not target an allowed agent: {m['thread_id']}")
+        # Generated missions state their graph explicitly instead of relying on the
+        # deprecated thread-id keyword inference.
+        m["graph"] = tier_for_thread_id(m["thread_id"])
     return data
 
 
-def _is_transient_error(exc: Exception) -> bool:
-    msg = str(exc).upper()
-    return any(x in msg for x in ("503", "UNAVAILABLE", "429", "RATE_LIMIT", "RESOURCE_EXHAUSTED", "QUOTA"))
+async def _bug_history_context(store, app: AppMeta) -> str:
+    """The most-seen known bugs of the app, formatted for the scenario-generation prompt."""
+    from agentic_explorer.memory import app_url_hash
+
+    bugs = await store.asearch(("episodes", app_url_hash(app.url), "bugs"), limit=15)
+    if not bugs:
+        return ""
+    bug_lines = []
+    for b in sorted(bugs, key=lambda x: x.value.get("seen_count", 0), reverse=True):
+        v = b.value
+        bug_lines.append(
+            f"- [{v.get('page', '?')}] {v.get('summary', '?')[:200]} "
+            f"(seen {v.get('seen_count', 1)}x, status: {v.get('status', 'open')})"
+        )
+    return "These areas have been historically buggy:\n" + "\n".join(bug_lines[:10])
 
 
 async def generate_missions_from_pr(pr_data: PRData, app: AppMeta, store=None) -> dict:
@@ -543,21 +545,11 @@ async def generate_missions_from_pr(pr_data: PRData, app: AppMeta, store=None) -
 
     bug_context = ""
     if store and app.url:
-        try:
-            from agentic_explorer.memory import app_url_hash
-            url_hash = app_url_hash(app.url)
-            bugs = await store.asearch(("episodes", url_hash, "bugs"), limit=15)
-            if bugs:
-                bug_lines = []
-                for b in sorted(bugs, key=lambda x: x.value.get("seen_count", 0), reverse=True):
-                    v = b.value
-                    bug_lines.append(
-                        f"- [{v.get('page', '?')}] {v.get('summary', '?')[:200]} "
-                        f"(seen {v.get('seen_count', 1)}x, status: {v.get('status', 'open')})"
-                    )
-                bug_context = "These areas have been historically buggy:\n" + "\n".join(bug_lines[:10])
-        except Exception:
-            pass
+        # Best effort: without the history the missions are still generated, but the
+        # failure is logged and counted instead of silently dropped.
+        bug_context = await guarded(
+            "PR bug history read", lambda: _bug_history_context(store, app), default="",
+        )
 
     system_msg = SystemMessage(content=_SYSTEM_PROMPT)
     human_msg = HumanMessage(content=_build_human_message(pr_data, app, bug_context=bug_context))
@@ -584,7 +576,7 @@ async def generate_missions_from_pr(pr_data: PRData, app: AppMeta, store=None) -
                     "      Detailed test instructions...\n"
                 ))
         except Exception as e:
-            if _is_transient_error(e) and attempt < max_retries - 1:
+            if is_transient_error(e) and attempt < max_retries - 1:
                 delay = base_delay * (2 ** attempt)
                 console.retry(attempt + 1, max_retries, delay)
                 await asyncio.sleep(delay)

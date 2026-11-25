@@ -1,5 +1,6 @@
 missions:
 - thread_id: test_data_heavy_user_01
+  graph: advanced
   prompt: 'Persona: data_heavy_user_agent
 
 

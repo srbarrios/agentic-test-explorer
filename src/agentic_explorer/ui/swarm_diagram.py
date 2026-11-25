@@ -2,26 +2,15 @@
 
 from __future__ import annotations
 
-STANDARD_AGENTS = ("new_user_agent", "power_user_agent", "adversarial_user_agent")
-ADVANCED_AGENTS = (
-    "accessibility_user_agent",
-    "data_heavy_user_agent",
-    "impatient_user_agent",
-    "returning_user_agent",
-    "explorer_agent",
-)
+from agentic_explorer.orchestration.personas import PERSONAS, personas_for_tier
+
+STANDARD_AGENTS = tuple(p.name for p in personas_for_tier("standard"))
+ADVANCED_AGENTS = tuple(p.name for p in personas_for_tier("advanced"))
 
 _LABELS = {
     "Supervisor": "Supervisor",
     "Summarizer": "Summarizer",
-    "new_user_agent": "New User",
-    "power_user_agent": "Power User",
-    "adversarial_user_agent": "Adversarial",
-    "accessibility_user_agent": "Accessibility",
-    "data_heavy_user_agent": "Data Heavy",
-    "impatient_user_agent": "Impatient",
-    "returning_user_agent": "Returning",
-    "explorer_agent": "Explorer",
+    **{p.name: p.label for p in PERSONAS.values()},
     "FINISH": "FINISH",
 }
 

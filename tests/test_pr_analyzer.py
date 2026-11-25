@@ -3,7 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agentic_explorer import pr_analyzer
+from agentic_explorer.config import AppMeta
+from agentic_explorer.memory_health import memory_health
 from agentic_explorer.pr_analyzer import (
+    PRData,
     _find_github_server,
     _parse_files_text,
     _parse_pr_metadata,
@@ -136,6 +140,57 @@ class PRAnalyzerTests(unittest.TestCase):
                 {"missions": [{"thread_id": "pr_123_unknown_01", "prompt": "Verify flow."}]},
                 123,
             )
+
+
+class _FakeScenarioLLM:
+    def __init__(self):
+        self.prompts = []
+
+    async def ainvoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        self.prompts.append(messages[-1].content)
+        return AIMessage(content='missions:\n  - thread_id: "pr_7_new_user_01"\n    prompt: "Check the cart."\n')
+
+
+class _BrokenStore:
+    async def asearch(self, *args, **kwargs):
+        raise RuntimeError("store is down")
+
+
+def _pr() -> PRData:
+    return PRData(owner="o", repo="r", number=7, title="Add cart", body="body", diff="diff", files_changed=[])
+
+
+async def test_missions_are_still_generated_when_the_bug_history_cannot_be_read(monkeypatch):
+    llm = _FakeScenarioLLM()
+    monkeypatch.setattr(pr_analyzer, "make_llm", lambda **kwargs: llm)
+
+    generated = await pr_analyzer.generate_missions_from_pr(
+        _pr(), AppMeta(name="Shop", url="https://app.test"), store=_BrokenStore(),
+    )
+
+    assert generated["missions"][0]["thread_id"] == "pr_7_new_user_01"
+    assert memory_health.count == 1  # no longer a silent `pass`
+    assert memory_health.errors[0].operation == "PR bug history read"
+    assert "historically buggy" not in llm.prompts[0]
+
+
+async def test_bug_history_is_injected_into_the_prompt_when_the_store_works(monkeypatch):
+    from langgraph.store.memory import InMemoryStore
+
+    from agentic_explorer.memory import app_url_hash, catalog_bug
+
+    llm = _FakeScenarioLLM()
+    monkeypatch.setattr(pr_analyzer, "make_llm", lambda **kwargs: llm)
+    store = InMemoryStore()
+    await catalog_bug(store, app_url_hash("https://app.test"), "Cart total is wrong", page="/cart")
+
+    await pr_analyzer.generate_missions_from_pr(_pr(), AppMeta(name="Shop", url="https://app.test"), store=store)
+
+    assert "historically buggy" in llm.prompts[0]
+    assert "Cart total is wrong" in llm.prompts[0]
+    assert memory_health.count == 0
 
 
 if __name__ == "__main__":

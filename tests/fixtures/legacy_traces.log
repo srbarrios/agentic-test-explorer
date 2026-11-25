@@ -1,0 +1,31 @@
+=== TRACES: test_new_user_01 ===
+
+STATE UPDATE FROM: new_user_agent
+================================== Ai Message ==================================
+
+[{'type': 'text', 'text': 'clicked add to cart'}]
+================================ Human Message =================================
+
+[STEP LIMIT] reset
+
+[new_user_agent] AIMessage
+================================== Ai Message ==================================
+
+[{'type': 'text', 'text': 'thinking about the cart'}]
+
+STATE UPDATE FROM: new_user_agent
+
+[new_user_agent] AIMessage
+================================== Ai Message ==================================
+
+no id yet
+
+[new_user_agent] AIMessage
+================================== Ai Message ==================================
+
+no id yet
+
+[new_user_agent] AIMessage
+================================== Ai Message ==================================
+
+from nowhere

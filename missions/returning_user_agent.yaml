@@ -1,5 +1,6 @@
 missions:
 - thread_id: test_returning_user_01
+  graph: advanced
   prompt: 'Persona: returning_user_agent
 
 

@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Create virtualenv
+        run: uv venv --python ${{ matrix.python-version }} .venv
+
+      # Guards against the lock drifting out of sync with pyproject.toml
+      # (dependabot used to bump packages one by one and left it unsatisfiable).
+      - name: Check requirements.txt is installable
+        run: uv pip install --dry-run -r requirements.txt
+
+      - name: Install package with dev extras
+        run: uv pip install -e ".[dev]"
+
+      - name: Run tests
+        run: .venv/bin/python -m pytest -q

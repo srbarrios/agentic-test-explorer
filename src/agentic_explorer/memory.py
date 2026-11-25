@@ -23,6 +23,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
+from agentic_explorer.memory_health import guarded, memory_health
+from agentic_explorer.orchestration.personas import persona_for_thread_id
+
 
 def app_url_hash(url: str) -> str:
     """Deterministic short hash of an app URL for namespace scoping."""
@@ -167,13 +170,26 @@ async def write_semantic_memories_from_tape(
 # Semantic memory: read for supervisor context
 # ---------------------------------------------------------
 
+def _has_embedding_index(store) -> bool:
+    """True when the store ranks ``asearch(query=...)`` results by embedding similarity.
+
+    Without an index the store ignores ``query`` and returns everything, so callers
+    must not mistake that for a filtered result.
+    """
+    return getattr(store, "index_config", None) is not None
+
+
 async def _semantic_search(store, namespace, limit: int, query: str = ""):
-    """Search store with optional semantic query; fall back to plain scan."""
-    if query:
+    """Search with a semantic query when the store has an index; otherwise a plain scan.
+
+    If the semantic search itself fails (e.g. the embedding service is down) the
+    failure is recorded and the plain scan is used instead.
+    """
+    if query and _has_embedding_index(store):
         try:
             return await store.asearch(namespace, query=query, limit=limit)
-        except (TypeError, Exception):
-            pass
+        except Exception as exc:
+            memory_health.record("semantic search", exc)
     return await store.asearch(namespace, limit=limit)
 
 
@@ -326,6 +342,28 @@ async def write_episode_memory(
 # Episodic memory: recall tool for agents
 # ---------------------------------------------------------
 
+_STOP_WORDS = frozenset({"the", "and", "for", "with", "from", "that", "this", "are", "was"})
+
+
+def _keyword_matches(items, query: str):
+    """Items whose text mentions any word of ``query``, best match first.
+
+    Without an embedding index this is the only way to honour a query. A word
+    matches as a substring of any string value of the item (summary, page, ...).
+    """
+    words = [w for w in re.findall(r"\w+", query.lower()) if len(w) >= 3 and w not in _STOP_WORDS]
+    words = words or ([query.strip().lower()] if query.strip() else [])
+
+    scored = []
+    for item in items:
+        text = " ".join(str(v) for v in item.value.values() if isinstance(v, str)).lower()
+        hits = sum(1 for w in words if w in text)
+        if hits:
+            scored.append((hits, item))
+    scored.sort(key=lambda pair: pair[0], reverse=True)  # stable: ties keep store order
+    return [item for _, item in scored]
+
+
 def get_recall_tool(store, url_hash: str):
     """Return a LangChain tool that agents can call to recall past findings.
 
@@ -334,17 +372,17 @@ def get_recall_tool(store, url_hash: str):
     """
     from langchain_core.tools import tool
 
+    indexed = _has_embedding_index(store)
+
     async def _search(namespace, query: str, limit: int):
-        """Attempt semantic search; fall back to keyword scan."""
-        try:
-            return await store.asearch(namespace, query=query, limit=limit)
-        except (TypeError, Exception):
-            items = await store.asearch(namespace, limit=limit * 3)
-            q = query.strip().lower()
-            return [
-                it for it in items
-                if any(q in str(v).lower() for v in it.value.values() if isinstance(v, str))
-            ][:limit]
+        """Semantic search when the store has an index; otherwise (or if it fails) keyword match."""
+        if indexed:
+            try:
+                return await store.asearch(namespace, query=query, limit=limit)
+            except Exception as exc:  # e.g. the embedding service is down
+                memory_health.record("semantic recall", exc)
+        items = await store.asearch(namespace, limit=limit * 3)
+        return _keyword_matches(items, query)[:limit]
 
     @tool
     async def recall_past_findings(query: str) -> str:
@@ -393,10 +431,11 @@ def get_recall_tool(store, url_hash: str):
 # ---------------------------------------------------------
 
 def get_memory_management_tool(store, url_hash: str):
-    """Return a Langmem tool allowing agents to proactively record observations."""
-    from langmem import create_manage_memory_tool
+    """Return a tool allowing agents to proactively record observations (via the langmem adapter)."""
+    from agentic_explorer.memory_backends import make_observation_tool
 
-    return create_manage_memory_tool(
+    return make_observation_tool(
+        store,
         namespace=("app", url_hash, "agent_observations"),
         instructions=(
             "Record important observations about the application under test that "
@@ -404,7 +443,6 @@ def get_memory_management_tool(store, url_hash: str):
             "unexpected UI behaviors, performance issues, confusing UX patterns, "
             "accessibility problems, or successful testing strategies worth repeating."
         ),
-        store=store,
         name="record_observation",
     )
 
@@ -492,14 +530,51 @@ def _format_routing_rules(data: Dict[str, Any]) -> str:
     return ""
 
 
-async def update_procedural_memory(store, url_hash: str, llm) -> None:
+async def _optimize_agent_prompt(store, prompts_ns, agent_name: str, optimizer, trajectory) -> None:
+    existing = await store.aget(prompts_ns, agent_name)
+    current_text = _format_agent_knowledge(existing.value) if existing else ""
+    base_prompt = (
+        f"You are {agent_name}, a QA testing agent. "
+        "Your goal is to test web applications effectively.\n"
+    )
+    if current_text:
+        base_prompt += f"\n{current_text}"
+
+    optimized = await optimizer.optimize(base_prompt, trajectory, context="batch review")
+    version = (existing.value.get("version", 0) + 1) if existing else 1
+    await store.aput(prompts_ns, agent_name, {
+        "agent_name": agent_name,
+        "optimized_prompt": optimized,
+        "version": version,
+    })
+
+
+async def _optimize_routing_rules(store, rules_ns, optimizer, trajectory) -> None:
+    existing = await store.aget(rules_ns, "current")
+    current_text = _format_routing_rules(existing.value) if existing else ""
+    base_rules = (
+        "You are the QA Orchestrator routing supervisor. "
+        "Decide which agent to route to based on mission progress and page areas.\n"
+    )
+    if current_text:
+        base_rules += f"\n{current_text}"
+
+    optimized = await optimizer.optimize(base_rules, trajectory, context="routing review")
+    version = (existing.value.get("version", 0) + 1) if existing else 1
+    await store.aput(rules_ns, "current", {"optimized_prompt": optimized, "version": version})
+
+
+async def update_procedural_memory(store, url_hash: str, llm, *, optimizer=None) -> None:
     """Reflect on recent sessions and update agent prompt supplements and routing rules.
 
-    Uses Langmem's prompt optimizer for structured reflection on episodic memory.
-    Called once after all missions in a batch complete.
-    """
-    from langmem import create_prompt_optimizer
+    Each persona learns under its own name, which is how agents read it back
+    (``get_agent_prompt_supplement``). A mission is attributed to the persona its
+    ``thread_id`` names; missions that follow no persona naming convention still feed
+    the routing rules but create no agent prompt. A failure to optimize one prompt is
+    recorded and does not stop the others. Called once after all missions in a batch.
 
+    ``optimizer`` is any ``PromptOptimizer``; by default langmem's, built from ``llm``.
+    """
     sessions = await store.asearch(("episodes", url_hash, "sessions"), limit=15)
     if not sessions:
         return
@@ -521,62 +596,29 @@ async def update_procedural_memory(store, url_hash: str, llm) -> None:
             ),
         })
 
-    optimizer = create_prompt_optimizer(llm, kind="prompt_memory")
+    if optimizer is None:
+        from agentic_explorer import memory_backends
+
+        optimizer = memory_backends.LangmemOptimizer(llm)
+
+    # Sessions are stored under the mission's thread_id ("test_new_user_01"), but agents
+    # read their learned supplement by persona name ("new_user_agent"). Learning under the
+    # thread_id, as this used to do, meant nothing an agent learned was ever read back.
+    personas = (persona_for_thread_id(s.value.get("thread_id", "")) for s in sessions)
+    agent_names = list(dict.fromkeys(p.name for p in personas if p))
 
     prompts_ns = ("procedures", url_hash, "agent_prompts")
-    agent_names: set = set()
-    for s in sessions:
-        tid = s.value.get("thread_id", "")
-        agent_names.add(tid)
-
     for agent_name in agent_names:
-        existing = await store.aget(prompts_ns, agent_name)
-        current_text = _format_agent_knowledge(existing.value) if existing else ""
-        base_prompt = (
-            f"You are {agent_name}, a QA testing agent. "
-            "Your goal is to test web applications effectively.\n"
+        await guarded(
+            f"prompt update for {agent_name}",
+            lambda name=agent_name: _optimize_agent_prompt(store, prompts_ns, name, optimizer, trajectory_messages),
         )
-        if current_text:
-            base_prompt += f"\n{current_text}"
-
-        try:
-            optimized = await optimizer.ainvoke({
-                "trajectories": [(trajectory_messages, {"context": "batch review"})],
-                "prompt": base_prompt,
-            })
-            optimized_text = optimized if isinstance(optimized, str) else str(optimized)
-            version = (existing.value.get("version", 0) + 1) if existing else 1
-            await store.aput(prompts_ns, agent_name, {
-                "agent_name": agent_name,
-                "optimized_prompt": optimized_text,
-                "version": version,
-            })
-        except Exception:
-            pass
 
     rules_ns = ("procedures", url_hash, "routing_rules")
-    existing_rules = await store.aget(rules_ns, "current")
-    current_rules_text = _format_routing_rules(existing_rules.value) if existing_rules else ""
-    base_rules = (
-        "You are the QA Orchestrator routing supervisor. "
-        "Decide which agent to route to based on mission progress and page areas.\n"
+    await guarded(
+        "routing rules update",
+        lambda: _optimize_routing_rules(store, rules_ns, optimizer, trajectory_messages),
     )
-    if current_rules_text:
-        base_rules += f"\n{current_rules_text}"
-
-    try:
-        optimized_rules = await optimizer.ainvoke({
-            "trajectories": [(trajectory_messages, {"context": "routing review"})],
-            "prompt": base_rules,
-        })
-        optimized_text = optimized_rules if isinstance(optimized_rules, str) else str(optimized_rules)
-        version = (existing_rules.value.get("version", 0) + 1) if existing_rules else 1
-        await store.aput(rules_ns, "current", {
-            "optimized_prompt": optimized_text,
-            "version": version,
-        })
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------

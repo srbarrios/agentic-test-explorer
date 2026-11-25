@@ -34,10 +34,18 @@ A core architectural principle is the **brain/hands separation** implemented in
 Supported JSON actions: `navigate`, `click`, `fill`, `press`, `select_option`, `hover`,
 `wait_for`, `scroll`, `extract_text`, `snapshot`.
 
-### Agent Types
-`main.py` automatically compiles either a standard or advanced graph based on `thread_id`
-keywords (`accessibility`, `a11y`, `data_heavy`, `data-heavy`, `impatient`, `returning`,
-`explorer`, `chaos`, `autonomous` → advanced; everything else → standard).
+### Agent Types and Graph Selection
+`src/agentic_explorer/orchestration/personas.py` is the **single registry** of personas
+(`PERSONAS`): each entry carries the persona's name, diagram label, role, focus, one-line
+supervisor description, tier (`standard` | `advanced`) and the `thread_id` keywords that
+identify it. `orchestration/graph.py::build_graph(..., tier=...)` builds the supervisor/worker
+swarm for one tier; `main.py` builds both and runs each mission on the graph named by its
+`graph:` field (`resolve_tier`). A mission without `graph:` falls back to the **deprecated**
+`thread_id` keyword inference (`accessibility`, `a11y`, `data_heavy`, `data-heavy`,
+`impatient`, `returning`, `explorer`, `chaos`, `autonomous` → advanced; everything else →
+standard), which matches plain substrings and prints a warning. PR-generated missions always
+set `graph:` explicitly. `standard_graph.py` and `advanced_graph.py` remain only as deprecated
+thin wrappers.
 
 ### PR-Driven Scenario Generation
 `src/agentic_explorer/pr_analyzer.py` provides a pipeline that sits **before** mission
@@ -55,14 +63,15 @@ execution:
    prompt, calls the configured LLM (Claude or Gemini), parses the YAML response, validates
    the mission structure, and retries on parse failures or transient API errors.
 
-The generated missions follow the standard YAML format and are routed to agents via the same
-`thread_id`-keyword mechanism. Thread IDs use the convention `pr_{number}_{agenttype}_{nn}`.
+The generated missions follow the standard YAML format; `_validate_missions` sets an explicit
+`graph:` on each one from its persona. Thread IDs use the convention
+`pr_{number}_{agenttype}_{nn}`.
 
-* **Standard QA Agents** (`src/agentic_explorer/orchestration/standard_graph.py`): Three agents available for routing by the supervisor:
+* **Standard QA Agents** (tier `standard`): Three agents available for routing by the supervisor:
   * `new_user_agent` — tests onboarding flows, discoverability, default states, and empty states.
   * `power_user_agent` — uses keyboard shortcuts, bulk operations, advanced filters, edge-case workflows.
   * `adversarial_user_agent` — deliberately tries to break things (invalid inputs, back-button abuse).
-* **Advanced Testing Agents** (`src/agentic_explorer/orchestration/advanced_graph.py`):
+* **Advanced Testing Agents** (tier `advanced`):
   * `accessibility_user_agent` — validates WCAG compliance, screen reader navigation, keyboard-only interaction.
   * `data_heavy_user_agent` — uploads large files, creates thousands of records, uses long strings.
   * `impatient_user_agent` — cancels operations mid-flight, refreshes during submissions, clicks buttons multiple times.
@@ -73,21 +82,40 @@ The generated missions follow the standard YAML format and are routed to agents 
 * **Persistent Memory**: State is persisted via an SQLite checkpointer (`agent_memory.sqlite`),
   keyed by the `thread_id`. A companion `AsyncSqliteStore` (sharing the same SQLite file,
   optionally configured with an embedding index for semantic search) provides cross-session
-  memory. LLM-driven memory operations (procedural reflection, agent observations) are
-  powered by the **Langmem SDK**.
+  memory. LLM-driven memory operations (procedural reflection, agent observations) use the
+  **Langmem SDK**, which only the adapters in `memory_backends.py` import (lazily).
 * **Mission Isolation**: Each mission has a unique `thread_id` to isolate its checkpoints;
   reusing a thread ID resumes the prior context. Use `--clear-checkpoints` to reset
   checkpoints while preserving learned memory, `--clear-learned` for the inverse, or
   `--clear-all` for both.
+* **Graceful stop and resume** (`runtime/drain.py`): The first Ctrl-C (or SIGTERM) asks
+  LangGraph to drain: the step in progress finishes, the checkpoint is saved and the process
+  exits with status 130. Running the same command again resumes the interrupted mission
+  without repeating the finished step; `traces.log` is appended to and marked
+  `=== RESUMED ===`. A second Ctrl-C aborts immediately.
+* **Node resilience** (`orchestration/resilience.py`, `config.yaml` `runtime:`): every agent
+  and the supervisor get an *idle* timeout (`node_idle_timeout_s`, renewed by any LLM or tool
+  activity inside the node, so long healthy turns are never cut) and a retry for nodes that
+  timed out. An agent that still fails becomes a `[NODE FAILED]` message and control returns
+  to the supervisor via the Summarizer. Transient API errors (429/503/529) are deliberately
+  **not** handled there: they are re-raised so the mission-level `with_retry` can wait and
+  resume from the checkpoint.
 * **`AgentState`**: A unified state `TypedDict` that carries `messages`,
   `next_agent`, `step_count`, `action_tape` (bounded to 50 entries in state; full log
-  persisted to JSONL on disk), `bugs_found`, and `explored_paths`.
+  persisted to JSONL on disk), `bugs_found`, and `explored_paths`. `messages` uses the
+  `add_messages` reducer (so `RemoveMessage` really deletes history); `bugs_found` and
+  `explored_paths` use `operator.add` and arrive as per-node **deltas**.
 * **Message Summarization**: A `Summarizer` node between agents and the Supervisor
   compresses old messages to prevent unbounded state growth. Keeps the first HumanMessage
-  (mission prompt) and the 20 most recent messages; messages in between are replaced with
-  a deterministic compact summary.
+  (mission prompt) and the 20 most recent messages; the messages in between are replaced by
+  one deterministic compact summary (no LLM call) placed right after the mission prompt.
+  Agent nodes return only the messages they produced, never the replayed history. Agents are
+  given a text-only copy of the history (`_sanitize_messages_for_model` drops system and tool
+  messages): the summarizer can cut an AI tool-call / tool-result pair in half, which
+  Anthropic rejects.
 * **Cross-Session Memory** (`src/agentic_explorer/memory.py`): Four levels of memory backed
-  by the LangGraph Store, with LLM-driven operations powered by **Langmem**:
+  by the LangGraph Store, with LLM-driven operations behind the `PromptOptimizer` and
+  observation-tool adapters of `memory_backends.py` (currently **Langmem**):
   - **Semantic** — page knowledge, selector reliability tracking, application quirks
     (written automatically on every agent turn from action tape entries), plus
     Langmem-managed agent observations (recorded proactively via `record_observation` tool).
@@ -96,8 +124,11 @@ The generated missions follow the standard YAML format and are routed to agents 
     semantic vector search when an embedding index is configured (falls back to keyword
     matching otherwise).
   - **Procedural** — per-agent prompt supplements and supervisor routing rules. Optimized
-    via Langmem's `create_prompt_optimizer` after each batch; read at graph construction
-    time to evolve agent prompts and routing strategy.
+    after each batch through a `PromptOptimizer` (Langmem's `create_prompt_optimizer` by
+    default); read at graph construction time to evolve agent prompts and routing strategy.
+    Each mission is attributed to the persona its `thread_id` names
+    (`persona_for_thread_id`), because agents read their supplement by persona name; ids
+    that follow no persona convention (e.g. `smoke_checkout_01`) feed only the routing rules.
   - **Prioritization** — risk-scored page ranking (bug density, selector flakiness, quirk
     count). Injected into supervisor routing context automatically.
 
@@ -107,6 +138,12 @@ The generated missions follow the standard YAML format and are routed to agents 
   ("episodes", "{url_hash}", "sessions"|"bugs")
   ("procedures", "{url_hash}", "agent_prompts"|"routing_rules")
   ```
+
+  **Memory is best-effort, never silent** (`memory_health.py`): a broken store must not abort
+  a mission, but every failed memory operation is logged with its traceback to the
+  `agentic_explorer.memory` logger, counted, and warned about once per kind on the console.
+  `MissionResult.memory_errors` and a `Memory errors` line in `test_report.md` show how many
+  failed during a mission, so a run that learned nothing is visible.
 
 ## Configuration Surface
 The framework is configured through three user-supplied files (templates ship as
@@ -125,7 +162,9 @@ The framework is configured through three user-supplied files (templates ship as
 * **`config.yaml`** (loaded by `src/agentic_explorer/config.py`) — `app.{name,url,description}`,
   `auth.{method,selectors,post_login_check}`, `paths.{mcp_servers,skills_root}`,
   `llm.{provider,claude_model,gemini_model,claude_vision_model,gemini_vision_model,
-  embedding_model,embedding_dims}`. Supports `${ENV_VAR}` interpolation. Embedding config
+  embedding_model,embedding_dims}`,
+  `runtime.{node_idle_timeout_s,node_run_timeout_s,node_retries}` (node timeouts; `0`
+  disables a timeout). Supports `${ENV_VAR}` interpolation. Embedding config
   enables semantic search in long-term memory (e.g. `embedding_model: google-genai:models/embedding-001`,
   `embedding_dims: 768`). Also overridable via `EMBEDDING_MODEL` and `EMBEDDING_DIMS` env vars.
 * **`mcp_servers.json`** — Claude-Desktop-compatible MCP server map. Optional; agents run
@@ -162,8 +201,9 @@ The framework is configured through three user-supplied files (templates ship as
   can call this tool to query the bug catalog, session history, and quirks. Uses semantic
   vector search when the store has an embedding index configured; falls back to keyword
   matching otherwise. Added to agent tool bundles automatically when a store is available.
-* **Observation Recording** (`record_observation`, powered by Langmem's
-  `create_manage_memory_tool`): Agents can proactively record high-level observations
+* **Observation Recording** (`record_observation`, built by
+  `memory_backends.make_observation_tool` on Langmem's `create_manage_memory_tool`):
+  Agents can proactively record high-level observations
   about the application (unexpected behaviors, UX issues, successful strategies). These
   observations are stored in the `agent_observations` namespace and surfaced in the
   supervisor's `MEMORY_CONTEXT` in subsequent runs.
@@ -183,6 +223,13 @@ The framework is configured through three user-supplied files (templates ship as
    `langchain`, `langchain-anthropic`, `langchain-google-genai`, `langchain-google-vertexai`,
    `langgraph`, `langmem`, `playwright`, `python-dotenv`, `pyyaml`, `pillow`,
    `langchain-mcp-adapters`, `langgraph-checkpoint-sqlite`, `aiosqlite`, `httpx`.
+   Use Python 3.11–3.12 (3.14 cannot build `pyarrow`, pulled in by
+   `langchain-google-vertexai`). For a reproducible install use
+   `uv pip install -r requirements.txt && uv pip install -e . --no-deps`; regenerate that
+   lock with `uv pip compile pyproject.toml -o requirements.txt --python-version 3.11`
+   whenever `pyproject.toml` changes (CI verifies it stays installable). `mcp` is capped
+   at `<2` because `langchain-mcp-adapters` 0.2.x breaks with `mcp` 2.x.
+   Developer extras: `uv pip install -e ".[dev]"` (pytest).
 2. **Install browser**: Run `playwright install chromium`.
 3. **Configure**: Copy `.env.example` → `.env`, `config.yaml.example` → `config.yaml`, and
    (optionally) `mcp_servers.json.example` → `mcp_servers.json`. Fill in your app's URL,
@@ -205,6 +252,8 @@ Execute missions defined in YAML format (see `missions/README.md`):
   (preserves checkpoints for resume)
 * **Custom Step Limit**: `agent-explorer --missions missions/new_user_agent.yaml --max-steps 50`
   (default: 30; supervisor resets to the app homepage on limit and tries a new strategy)
+* **Stop and Resume**: press Ctrl-C once to stop at a safe point (exit status 130) and run
+  the same command again to resume the interrupted mission; press it twice to abort now.
 
 PR-driven test generation (prefers GitHub MCP server; falls back to [`gh` CLI](https://cli.github.com/)):
 * **Generate Only**: `agent-explorer --pr-url https://github.com/org/repo/pull/123`
@@ -220,11 +269,19 @@ Regression testing and model export:
 * **Export Model**: `agent-explorer --export-model`
   — exports discovered app structure as `app_model.json` (no browser needed)
 
+### Tests
+`uv pip install -e ".[dev]"` then `pytest -q`. The suite needs no LLM, browser or network:
+agents run on fake chat models, and the streaming, resilience and stop/resume tests use
+real compiled LangGraph graphs (others use small fakes for speed). Nothing in the suite
+talks to a real LLM, so model behaviour itself is not covered. CI runs it on Python 3.11
+and 3.12 and also checks that `requirements.txt` stays installable.
+
 ## Output Artifacts
 Every mission generates artifacts localized in a `report_<thread_id>/` directory:
-* `traces.log`: Full message history with tool calls and responses.
+* `traces.log`: Full message history with tool calls and responses (each message once;
+  appended, with a `=== RESUMED ===` marker, when a stopped mission is resumed).
 * `test_report.md`: An LLM-generated summary detailing actions, issues, Action Tape stats,
-  and status.
+  and status, plus a `Memory errors` count when a memory operation failed.
 * `action_tape.jsonl`: Immutable, line-delimited JSON log of every deterministic browser
   command executed (used for reproduction).
 * `reproduction_*.spec.ts`: Auto-generated Playwright TypeScript test files. Run with
@@ -250,26 +307,38 @@ Every mission generates artifacts localized in a `report_<thread_id>/` directory
     3. Semantic HTML / visible text → `button:has-text('Save')`, `text='Apply'`
     * **Forbidden**: XPath (`//div`), positional CSS (`:nth-child(3)`,
       `div > span:nth-of-type(2)`). Always call `get_dom_snapshot` first.
-* **Graph Builders Are Async**: `build_graph()` and `build_advanced_graph()` are `async`
-  functions (they read procedural memory from the store at construction time). Always
-  `await` them.
+* **Graph Builders Are Async**: `orchestration.graph.build_graph(..., tier=...)` is an
+  `async` function (it reads procedural memory from the store at construction time). Always
+  `await` it. `standard_graph.build_graph` and `advanced_graph.build_advanced_graph` are
+  deprecated wrappers; do not call them from new code.
 * **Memory Module**: All cross-session memory logic lives in `src/agentic_explorer/memory.py`.
   Do not scatter store reads/writes across other files — add new memory functions there and
-  import them. LLM-driven operations (procedural reflection, agent observations) use the
-  **Langmem SDK** (`langmem` package). Store namespace conventions:
-  `("app", hash, ...)` for semantic, `("episodes", hash, ...)` for episodic,
-  `("procedures", hash, ...)` for procedural.
-* **Agent Modification**: If adding a new agent, you must update the system prompt, tool
-  bundle, agent registry, supervisor descriptions, and routing keywords when applicable.
-  The agent will automatically receive procedural memory supplements if the store has
-  entries for its name.
-* **Mission Modifications**: If adding a new advanced mission category, update both the
-  mission `thread_id` naming and the `ADVANCED_KEYWORDS` tuple in `main.py`.
+  import them. Only `memory_backends.py` may import `langmem` (it is unmaintained since
+  Oct 2025 and pulls a LangGraph import that LangGraph 2.0 removes), and only lazily. A
+  best-effort memory operation must go through `guarded(...)` from `memory_health.py`:
+  never write `except Exception: pass`. Do not rely on `store.asearch(query=...)` to filter
+  unless `store.index_config` is set: without an embedding index the query is ignored.
+  Store namespace conventions: `("app", hash, ...)` for semantic,
+  `("episodes", hash, ...)` for episodic, `("procedures", hash, ...)` for procedural.
+* **Agent Modification**: To add a persona, add one `Persona` entry to `PERSONAS` in
+  `orchestration/personas.py` (role, focus, supervisor description, tier, thread-id
+  keywords). Graph nodes, the Mermaid diagram labels and the PR keyword list derive from it.
+  Also add its description to `pr_analyzer._SYSTEM_PROMPT` and a `missions/<name>.yaml`
+  template with `graph:` set; tests fail if either is missing. The tool bundle is shared by
+  all personas. A persona automatically receives procedural supplements stored under its
+  name.
+* **Mission Modifications**: A mission picks its graph with `graph: standard|advanced`.
+  Do not depend on `thread_id` keywords: that inference is deprecated and matches plain
+  substrings (`test_new_user_explorer_notes` would run on the advanced graph).
 * **PR Analyzer Modifications**: The PR scenario generation prompt is in
   `src/agentic_explorer/pr_analyzer.py` (`_SYSTEM_PROMPT`). When adding a new agent type,
-  also add its description to this prompt and update PR mission validation so the LLM can
-  route PR changes to it. Generated thread IDs must follow `pr_{number}_{agenttype}_{nn}`
-  and respect `ADVANCED_KEYWORDS`.
+  also add its description to this prompt so the LLM can route PR changes to it. Generated
+  thread IDs must follow `pr_{number}_{agenttype}_{nn}` and contain a persona keyword
+  (`ALL_KEYWORDS` in `personas.py`).
+* **Testing Streaming Changes**: A fake graph that you wrap in the expected stream shape
+  cannot prove LangGraph really emits that shape. Any change to how the stream is consumed
+  needs at least one test on a real compiled graph (see
+  `test_runs_end_to_end_on_a_real_langgraph_v2_stream` in `tests/test_runner.py`).
 * **LLM Configuration**: The system supports Claude (default) and Gemini providers. The
   provider is auto-detected from credentials or set explicitly via `LLM_PROVIDER` env var,
   `--provider` CLI flag, or `config.yaml > llm.provider`. Smart model defaults are chosen
@@ -288,5 +357,5 @@ Every mission generates artifacts localized in a `report_<thread_id>/` directory
 * **Visual Mode Integration**: When adding new state fields to the swarm, emit them via
   `state_emitter.update()` from the appropriate integration point (supervisor for step/bug
   counts, agent nodes for thoughts, browser engine for actions). Always check
-  `state_emitter.is_enabled()` before emitting. See existing integrations in `main.py`,
-  `graph_base.py`, and `engine.py` for patterns.
+  `state_emitter.is_enabled()` before emitting. See existing integrations in
+  `runtime/runner.py`, `graph_base.py`, and `engine.py` for patterns.

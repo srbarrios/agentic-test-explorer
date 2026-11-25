@@ -15,10 +15,13 @@ import re
 from typing import Annotated, Any, Dict, List, Sequence, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
+from langgraph.graph.message import add_messages
 
+from agentic_explorer.memory_health import guarded
 from agentic_explorer.tools.browser.engine import get_action_tape
 from agentic_explorer.utils import console
 from agentic_explorer.utils.llm import make_llm  # noqa: F401  re-exported for back-compat
+from agentic_explorer.utils.messages import clip_text, message_text
 
 
 BROWSER_AGENT_RULES = (
@@ -68,7 +71,9 @@ def _bounded_tape_reducer(old: List[Dict[str, Any]], new: List[Dict[str, Any]]) 
 
 
 class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], operator.add]
+    # add_messages (not operator.add) so RemoveMessage from the Summarizer node
+    # actually deletes history and messages with the same id are replaced.
+    messages: Annotated[Sequence[BaseMessage], add_messages]
     next_agent: str
     # Recent browser commands kept in state (capped); full log persisted to JSONL.
     action_tape: Annotated[List[Dict[str, Any]], _bounded_tape_reducer]
@@ -227,7 +232,7 @@ def _extract_bugs(messages: Sequence[BaseMessage]) -> List[str]:
                     summary = args.get("bug_summary") if isinstance(args, dict) else None
                     if summary:
                         _add(str(summary))
-            for extracted in _extract_bugs_from_text(_msg_text(msg)):
+            for extracted in _extract_bugs_from_text(message_text(msg)):
                 _add(extracted)
 
     return bugs
@@ -248,23 +253,6 @@ def _extract_paths(messages: Sequence[BaseMessage]) -> List[str]:
 # ReAct console helpers (used inside agent nodes)
 # ---------------------------------------------------------
 
-def _msg_text(msg: BaseMessage) -> str:
-    content = msg.content
-    if isinstance(content, list):
-        return "".join(b.get("text", "") for b in content if isinstance(b, dict) and "text" in b)
-    return str(content)
-
-
-def _clip_text(text: str, max_chars: int) -> str:
-    """Return ``text`` capped for LLM routing/report prompts."""
-    text = text.strip()
-    if len(text) <= max_chars:
-        return text
-    if max_chars <= 24:
-        return text[:max(0, max_chars)]
-    return text[: max_chars - 24].rstrip() + " … [truncated]"
-
-
 def _compact_message(msg: BaseMessage, max_chars: int = 900) -> str:
     """Summarize one LangChain message for supervisor routing.
 
@@ -275,7 +263,7 @@ def _compact_message(msg: BaseMessage, max_chars: int = 900) -> str:
     if isinstance(msg, SystemMessage):
         return ""
     role = msg.type.upper()
-    text = _clip_text(_msg_text(msg), max_chars)
+    text = clip_text(message_text(msg), max_chars)
     tool_calls = getattr(msg, "tool_calls", None) or []
     if tool_calls:
         tools = ", ".join(tc.get("name", "unknown_tool") for tc in tool_calls)
@@ -289,7 +277,7 @@ def _compact_message(msg: BaseMessage, max_chars: int = 900) -> str:
 def _first_human_message(messages: Sequence[BaseMessage]) -> str:
     for msg in messages:
         if isinstance(msg, HumanMessage):
-            return _clip_text(_msg_text(msg), 1800)
+            return clip_text(message_text(msg), 1800)
     return "<mission prompt unavailable>"
 
 
@@ -326,7 +314,7 @@ def _build_routing_context(state: AgentState, extra_messages: Sequence[BaseMessa
         "MISSION:\n" + _first_human_message(messages),
         "RECENT_PROGRESS:\n" + _format_recent_progress(messages),
         "RECENT_BROWSER_ACTIONS:\n" + _format_recent_actions(state.get("action_tape", [])),
-        "BUGS_FOUND:\n" + ("\n".join(f"- {_clip_text(b, 240)}" for b in bugs[-8:]) if bugs else "- none"),
+        "BUGS_FOUND:\n" + ("\n".join(f"- {clip_text(b, 240)}" for b in bugs[-8:]) if bugs else "- none"),
         "EXPLORED_URLS:\n" + ("\n".join(f"- {p}" for p in paths) if paths else "- none"),
     ]
     if memory_context:
@@ -336,37 +324,15 @@ def _build_routing_context(state: AgentState, extra_messages: Sequence[BaseMessa
     return "\n\n".join(sections)
 
 
-def _summarize_tool_args(tool_call: dict, max_chars: int = 80) -> str:
-    import json
-    args = tool_call.get("args") or {}
-    if not isinstance(args, dict):
-        text = str(args)
-    elif "action" in args:
-        parts = [f"action={args['action']}"]
-        for key in ("selector", "url", "value", "key"):
-            if args.get(key):
-                val = str(args[key])
-                if len(val) > 40:
-                    val = val[:37] + "..."
-                parts.append(f"{key}={val!r}")
-        text = " ".join(parts)
-    else:
-        try:
-            text = json.dumps(args, ensure_ascii=False, default=str)
-        except Exception:
-            text = str(args)
-    return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
-
-
 def _print_react(msg: BaseMessage, node_name: str, max_chars: int) -> None:
     if isinstance(msg, SystemMessage):
         return
     if isinstance(msg, AIMessage):
-        text = _msg_text(msg)
+        text = message_text(msg)
         if text.strip():
             console.react_thought(node_name, text, max_chars=max_chars)
     elif isinstance(msg, HumanMessage):
-        text = _msg_text(msg)
+        text = message_text(msg)
         if text.strip():
             console.info(f"HUMAN: {text[:120]}")
 
@@ -389,7 +355,7 @@ def _sanitize_messages_for_model(messages: Sequence[BaseMessage]) -> List[BaseMe
         if isinstance(msg, (SystemMessage, ToolMessage)):
             continue
 
-        text = _msg_text(msg).strip()
+        text = message_text(msg).strip()
         if not text:
             continue
 
@@ -428,6 +394,7 @@ def make_agent_node(agent, *, name: str = "agent", quiet: bool = False, app_url_
             filtered_state["messages"] = _sanitize_messages_for_model(
                 filtered_state["messages"]
             )
+        n_input = len(filtered_state.get("messages", []))
 
         out: dict = {}
         seen_count = 0
@@ -437,23 +404,24 @@ def make_agent_node(agent, *, name: str = "agent", quiet: bool = False, app_url_
             for msg in messages[seen_count:]:
                 _print_react(msg, name, _max)
                 if state_emitter.is_enabled() and isinstance(msg, AIMessage):
-                    text = _msg_text(msg)
+                    text = message_text(msg)
                     if text.strip():
                         state_emitter.append_thought(name, text)
                         state_emitter.emit()
             seen_count = len(messages)
 
-        new_messages: Sequence[BaseMessage] = out.get("messages", [])
+        # The compiled agent streams its whole state: the (sanitized) input comes back
+        # first, then what the agent produced. Only the latter is new; returning all of
+        # it re-added the history and re-counted every earlier bug on each turn.
+        new_messages: Sequence[BaseMessage] = list(out.get("messages", []))[n_input:]
         new_tape = list(get_action_tape(thread_id)[before:])
 
         if store and app_url_hash and new_tape:
             from agentic_explorer.memory import write_semantic_memories_from_tape
-            try:
-                await write_semantic_memories_from_tape(
-                    store, app_url_hash, new_tape, agent_name=name,
-                )
-            except Exception:
-                pass
+            await guarded(
+                "semantic memory write",
+                lambda: write_semantic_memories_from_tape(store, app_url_hash, new_tape, agent_name=name),
+            )
 
         return {
             "messages": new_messages,
@@ -513,10 +481,11 @@ def make_supervisor_node(llm, agent_names: tuple, app_url: str, max_steps: int, 
         memory_context = ""
         if store and app_url_hash:
             from agentic_explorer.memory import format_memory_context
-            try:
-                memory_context = await format_memory_context(store, app_url_hash)
-            except Exception:
-                pass
+            memory_context = await guarded(
+                "memory context read",
+                lambda: format_memory_context(store, app_url_hash),
+                default="",
+            )
 
         # Build context-rich routing prompt
         bugs_ctx = f" {len(state.get('bugs_found', []))} bug(s) found so far." if state.get("bugs_found") else ""
@@ -608,17 +577,16 @@ def make_summarizer_node(*, keep_recent: int = _SUMMARIZER_KEEP_RECENT):
             + "\n".join(f"  {line}" for line in compact_lines)
         )
 
-        removals = [
-            RemoveMessage(id=msg.id)
-            for msg in old_messages
-            if getattr(msg, "id", None)
-        ]
-        if not removals:
+        # The summary takes the id of the first old message that can be addressed, so
+        # add_messages replaces that message in place and the summary keeps its
+        # chronological spot (after the mission prompt, before the recent messages).
+        # The remaining old messages are removed.
+        removable = [msg for msg in old_messages if getattr(msg, "id", None)]
+        if not removable:
             return {}
 
-        return {
-            "messages": removals + [HumanMessage(content=summary_text)],
-        }
+        summary = HumanMessage(content=summary_text, id=removable[0].id)
+        return {"messages": [summary, *(RemoveMessage(id=msg.id) for msg in removable[1:])]}
 
     return summarizer_node
 
