@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -13,9 +13,10 @@ from langgraph.runtime import RunControl
 
 from agentic_explorer.memory import app_url_hash, write_episode_memory
 from agentic_explorer.memory_health import guarded, memory_health
-from agentic_explorer.orchestration.graph_base import dedupe_bugs
+from agentic_explorer.orchestration.findings import split_findings
 from agentic_explorer.reporting import (
     append_action_tape_summary,
+    append_findings_section,
     build_transcript,
     generate_report,
     make_report_llm,
@@ -40,6 +41,7 @@ class MissionResult:
     paths: List[str]
     tape_len: int
     memory_errors: int = 0  # memory operations that failed during this mission
+    uncertain: List[str] = field(default_factory=list)  # findings the agent could not confirm (not in ``bugs``)
 
 
 def _initial_state(prompt: str) -> Dict[str, Any]:
@@ -213,10 +215,18 @@ async def run_mission(
 
     console.step(f"Generating report for {thread_id}...")
     final_state = await graph.aget_state(run_config)
-    bugs_found = dedupe_bugs(final_state.values.get("bugs_found", []))
+    # bugs_found holds confirmed findings only; the ones the agent could not confirm are
+    # counted and shown apart, never mixed into the bug count.
+    bugs_found, uncertain = split_findings(
+        final_state.values.get("bugs_found", []), final_state.values.get("uncertain_findings", []),
+    )
+    evidence = final_state.values.get("bug_evidence", [])
     transcript = build_transcript(final_state.values.get("messages", []))
-    report_text = await generate_report(thread_id, transcript, bugs_found, report_llm_factory(), sleep=sleep)
+    report_text = await generate_report(
+        thread_id, transcript, bugs_found, report_llm_factory(), uncertain=uncertain, sleep=sleep,
+    )
     write_report(thread_id, report_text)
+    append_findings_section(thread_id, bugs_found, uncertain, evidence)
 
     tape = get_action_tape(thread_id)
     explored_paths = final_state.values.get("explored_paths", [])
@@ -241,10 +251,11 @@ async def run_mission(
     memory_errors = memory_health.count_since(memory_mark)
     append_action_tape_summary(
         thread_id, tape_len=len(tape), bugs_count=len(bugs_found), memory_errors=memory_errors,
+        uncertain_count=len(uncertain),
     )
     return MissionResult(
         thread_id=thread_id, bugs=bugs_found, paths=explored_paths, tape_len=len(tape),
-        memory_errors=memory_errors,
+        memory_errors=memory_errors, uncertain=uncertain,
     )
 
 

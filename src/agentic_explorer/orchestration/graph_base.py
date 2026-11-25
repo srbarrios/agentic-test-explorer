@@ -18,6 +18,14 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, Remove
 from langgraph.graph.message import add_messages
 
 from agentic_explorer.memory_health import guarded
+from agentic_explorer.orchestration.findings import (
+    ExtractedFindings,
+    dedupe_bugs,  # noqa: F401  re-exported for callers that import it from here
+    extract_findings,
+    is_dup_key,
+    normalize_bug_key,
+    split_findings,
+)
 from agentic_explorer.tools.browser.engine import get_action_tape
 from agentic_explorer.utils import console
 from agentic_explorer.utils.llm import make_llm  # noqa: F401  re-exported for back-compat
@@ -43,12 +51,25 @@ BROWSER_AGENT_RULES = (
     "Do NOT aggregate multiple issues into one entry. Do NOT omit minor issues — list them "
     "all. If you found zero issues, emit <bugs_found>[]</bugs_found> explicitly. Each entry "
     'must be: {"title": "<short imperative>", "summary": "<what + where + repro hint>", '
-    '"location": "<url or selector>", "severity": "critical|major|minor"}. Example: '
+    '"location": "<url or selector>", "severity": "critical|major|minor"}. '
+    "Evidence (add whenever you can): "
+    '"observed" = the exact value you saw, "observed_at" = where you read it (selector or '
+    'region text, and URL), "expected" = what it should have been, "confidence" = '
+    '"confirmed" or "uncertain". Use "uncertain" whenever you could not determine the '
+    "verdict yourself (flaky, could not reproduce, no way to know the right value, cannot "
+    "tell a bug from intended behaviour): an honest uncertain is worth more than a "
+    "confirmed that might be wrong, so never round up. Omit a field rather than guessing "
+    "it. Example: "
     '<bugs_found>[{"title": "Login validation race", "summary": "Filling fields rapidly '
     'then clicking submit shows a required-field error for an already-filled field", '
-    '"location": "/login", "severity": "major"}, {"title": "Empty cart lacks messaging", '
-    '"summary": "Cart page shows no guidance text when empty", "location": "/cart", '
-    '"severity": "minor"}]</bugs_found>'
+    '"location": "/login", "severity": "major"}, {"title": "Cart total ignores discount", '
+    '"summary": "Cart total shows the undiscounted price after applying SAVE20", '
+    '"location": "/cart", "severity": "major", "observed": "$120.00", "observed_at": '
+    '"[data-test=\\"total\\"] on /cart", "expected": "$96.00", "confidence": "confirmed"}, '
+    '{"title": "Coupon may reject lowercase codes", "summary": "SAVE20 applied but save20 '
+    'seemed to do nothing; the spec does not say if codes are case-sensitive", '
+    '"location": "/cart", "severity": "minor", "observed": "no change after save20", '
+    '"confidence": "uncertain"}]</bugs_found>'
 )
 
 
@@ -80,7 +101,11 @@ class AgentState(TypedDict):
     # Step counter for loop prevention; always replaced with the latest value.
     step_count: Annotated[int, lambda _old, new: new]
     # Bug summaries collected across all iterations (for final report and supervisor context).
+    # Confirmed findings only. Findings the agent could not confirm are counted and shown apart.
     bugs_found: Annotated[List[str], operator.add]
+    uncertain_findings: Annotated[List[str], operator.add]
+    # Observed / expected / where, one record per finding (see orchestration/findings.py).
+    bug_evidence: Annotated[List[Dict[str, str]], operator.add]
     # URL paths navigated to, used to guide the supervisor toward unexplored areas.
     explored_paths: Annotated[List[str], operator.add]
 
@@ -109,121 +134,27 @@ def filter_base_tools(base_tools: list) -> list:
 # Message introspection helpers
 # ---------------------------------------------------------
 
-_BUGS_TAG_RE = re.compile(r"<bugs_found>\s*(.*?)\s*</bugs_found>", re.DOTALL)
-# Conservative fallback: only fire on explicit "BUG FOUND" / "BUG:" prefixes,
-# optionally bold-wrapped, at line/sentence start. Avoids false positives from
-# narrative mentions of "bug" elsewhere in summaries.
-_BUG_PROSE_RE = re.compile(
-    r"(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?\s*(?:BUG\s+FOUND|BUG|ISSUE\s+FOUND)\s*(?:\*\*)?\s*[:\-—]\s*([^\n]{8,300})",
-    re.IGNORECASE,
-)
-
-
-def _normalize_bug_key(text: str) -> str:
-    """Normalize a bug entry to a stable comparable form.
-
-    Agents emit the same finding in three different shapes:
-    - snake_case slug from ``capture_bug_screenshot`` (``form_validation_race``)
-    - structured title:summary from the closing tag
-    - prose like ``BUG FOUND: Empty cart lacks messaging on /cart page.``
-
-    Title-prefix matching (``_is_dup_key``) collapses these together.
-    """
-    title = text.split(":", 1)[0] if ":" in text else text
-    title = title.split(".", 1)[0]
-    return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()[:60]
-
-
-def _is_dup_key(new_key: str, seen_keys: List[str], *, min_overlap: int = 12) -> bool:
-    """True if ``new_key`` is essentially the same bug as one already seen.
-
-    Match when either key fully prefixes the other and the shorter side has
-    at least ``min_overlap`` chars, so two genuinely different bugs that
-    share an opening word ('Login error', 'Login redirect') stay separate.
-    """
-    for existing in seen_keys:
-        short, long = (new_key, existing) if len(new_key) <= len(existing) else (existing, new_key)
-        if len(short) >= min_overlap and long.startswith(short):
-            return True
-    return False
-
-
-def dedupe_bugs(bugs: List[str]) -> List[str]:
-    """Return *bugs* with duplicates removed (first-seen order preserved)."""
-    out: List[str] = []
-    seen: List[str] = []
-    for bug in bugs:
-        key = _normalize_bug_key(bug)
-        if not key or _is_dup_key(key, seen):
-            continue
-        seen.append(key)
-        out.append(bug)
-    return out
+# Key normalisation, deduplication and the <bugs_found> parser live in findings.py;
+# the underscore names stay importable from here for existing callers and tests.
+_normalize_bug_key = normalize_bug_key
+_is_dup_key = is_dup_key
 
 
 def _extract_bugs_from_text(text: str) -> List[str]:
-    """Extract bug descriptions from ``<bugs_found>`` JSON blocks, with prose fallback."""
-    import json as _json
-
-    bugs: List[str] = []
-    seen_keys: List[str] = []
-
-    def _add(entry: str) -> None:
-        entry = entry.strip(": ").strip()[:500]
-        if not entry:
-            return
-        key = _normalize_bug_key(entry)
-        if not key or _is_dup_key(key, seen_keys):
-            return
-        seen_keys.append(key)
-        bugs.append(entry)
-
-    tag_matched = False
-    for m in _BUGS_TAG_RE.finditer(text):
-        tag_matched = True
-        try:
-            entries = _json.loads(m.group(1))
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if isinstance(entry, dict):
-                title = entry.get("title", "")
-                summary = entry.get("summary", "")
-                _add(f"{title}: {summary}")
-            elif isinstance(entry, str):
-                _add(entry)
-
-    # Prose fallback: catches "BUG FOUND: ..." prefixes the agent emits in
-    # narrative summaries instead of (or alongside) the structured tag.
-    # Always merged with dedupe so well-formed agents aren't double-counted.
-    for m in _BUG_PROSE_RE.finditer(text):
-        _add(m.group(1))
-
-    return bugs
+    """Confirmed bug descriptions from ``<bugs_found>`` JSON blocks, with prose fallback."""
+    return extract_findings(text).confirmed
 
 
-def _extract_bugs(messages: Sequence[BaseMessage]) -> List[str]:
-    """Pull bug summaries from capture_bug_screenshot calls and agent text.
+def _extract_turn_findings(messages: Sequence[BaseMessage]) -> ExtractedFindings:
+    """Findings of one agent turn: screenshots, ``<bugs_found>`` blocks and prose.
 
     For each screenshot tool call, the agent passes the bug title in
-    ``bug_summary`` — captured from AIMessage.tool_calls since the
-    ToolMessage result ("Evidence captured!...") drops that argument.
+    ``bug_summary`` (read from AIMessage.tool_calls, since the ToolMessage result
+    "Evidence captured!..." drops that argument). An explicit ``uncertain`` verdict
+    in a closing block wins over the screenshot that preceded it.
     """
-    bugs: List[str] = []
-    seen_keys: List[str] = []
-
-    def _add(entry: str) -> None:
-        entry = entry.strip(": ").strip()[:500]
-        if not entry:
-            return
-        key = _normalize_bug_key(entry)
-        if not key or _is_dup_key(key, seen_keys):
-            return
-        seen_keys.append(key)
-        bugs.append(entry)
-
+    text_found = ExtractedFindings()
+    screenshots: List[str] = []
     for msg in messages:
         if isinstance(msg, AIMessage):
             for tc in getattr(msg, "tool_calls", None) or []:
@@ -231,11 +162,29 @@ def _extract_bugs(messages: Sequence[BaseMessage]) -> List[str]:
                     args = tc.get("args") or {}
                     summary = args.get("bug_summary") if isinstance(args, dict) else None
                     if summary:
-                        _add(str(summary))
-            for extracted in _extract_bugs_from_text(message_text(msg)):
-                _add(extracted)
+                        screenshots.append(str(summary))
+            part = extract_findings(message_text(msg))
+            text_found.confirmed += part.confirmed
+            text_found.uncertain += part.uncertain
+            text_found.evidence += part.evidence
 
-    return bugs
+    uncertain_keys = [normalize_bug_key(u) for u in text_found.uncertain]
+    screenshots = [s for s in screenshots if not is_dup_key(normalize_bug_key(_clean_screenshot(s)), uncertain_keys)]
+    confirmed, uncertain = split_findings(
+        [_clean_screenshot(s) for s in screenshots] + text_found.confirmed, text_found.uncertain)
+    return ExtractedFindings(confirmed=confirmed, uncertain=uncertain, evidence=text_found.evidence)
+
+
+def _clean_screenshot(summary: str) -> str:
+    return summary.strip(": ").strip()[:500]
+
+
+def _extract_bugs(messages: Sequence[BaseMessage]) -> List[str]:
+    """Confirmed bugs of one agent turn (see ``_extract_turn_findings``)."""
+    return _extract_turn_findings(messages).confirmed
+
+
+
 
 
 def _extract_paths(messages: Sequence[BaseMessage]) -> List[str]:
@@ -423,10 +372,13 @@ def make_agent_node(agent, *, name: str = "agent", quiet: bool = False, app_url_
                 lambda: write_semantic_memories_from_tape(store, app_url_hash, new_tape, agent_name=name),
             )
 
+        findings = _extract_turn_findings(new_messages)
         return {
             "messages": new_messages,
             "action_tape": new_tape,
-            "bugs_found": _extract_bugs(new_messages),
+            "bugs_found": findings.confirmed,
+            "uncertain_findings": findings.uncertain,
+            "bug_evidence": findings.evidence,
             "explored_paths": _extract_paths(new_messages),
         }
 
