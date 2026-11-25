@@ -335,11 +335,13 @@ workflow.add_conditional_edges(
 
 El proyecto define tres fabricas de nodos en `graph_base.py`:
 
-| Fabrica | Archivo:Linea | Proposito |
+| Fabrica | Archivo | Proposito |
 |---|---|---|
-| `make_agent_node()` | graph_base.py:245 | Envuelve un agente compilado como nodo LangGraph |
-| `make_supervisor_node()` | graph_base.py:291 | Crea el nodo supervisor que enruta al siguiente agente |
-| `make_summarizer_node()` | graph_base.py:386 | Comprime mensajes para evitar desbordamiento de contexto |
+| `make_agent_node()` | graph_base.py | Envuelve un agente compilado como nodo LangGraph |
+| `make_supervisor_node()` | graph_base.py | Crea el nodo supervisor que enruta al siguiente agente |
+| `make_summarizer_node()` | graph_base.py | Comprime mensajes para evitar desbordamiento de contexto (conserva el prompt de la mision y los 20 mas recientes; un unico resumen determinista entre medias, justo despues del prompt de la mision) |
+
+Los timeouts, reintentos y el manejo de fallos de cada nodo se asocian al registrarlos (`orchestration/resilience.py`); ver seccion 15.
 
 > **Documentacion oficial sobre aristas condicionales:** [reference.langchain.com/python/langgraph/graph/state/StateGraph/add_conditional_edges](https://reference.langchain.com/python/langgraph/graph/state/StateGraph/add_conditional_edges)
 
@@ -442,9 +444,9 @@ def make_supervisor_node(llm, agent_names, app_url, max_steps, ...):
 
 ### Los dos tipos de grafos
 
-El proyecto define dos grafos segun la complejidad de la mision:
+El proyecto define dos grafos ("niveles") segun la complejidad de la mision. Ambos los construye la misma funcion, `build_graph(..., tier=...)` en `orchestration/graph.py`, a partir del registro unico de personas de `orchestration/personas.py` (`PERSONAS`). Cada mision indica su nivel con el campo `graph:` (ver seccion 13).
 
-#### Grafo Estandar (standard_graph.py): 3 Personas
+#### Nivel estandar: 3 Personas
 
 | Agente | Rol | Enfoque |
 |---|---|---|
@@ -452,7 +454,7 @@ El proyecto define dos grafos segun la complejidad de la mision:
 | `power_user_agent` | Usuario Experto | Atajos, operaciones masivas, filtros avanzados |
 | `adversarial_user_agent` | Chaos Monkey | Inputs invalidos, inyeccion SQL, clics rapidos |
 
-#### Grafo Avanzado (advanced_graph.py): 5 Personas + Explorador
+#### Nivel avanzado: 5 agentes (4 personas + el Explorador autonomo)
 
 | Agente | Rol | Enfoque |
 |---|---|---|
@@ -464,17 +466,20 @@ El proyecto define dos grafos segun la complejidad de la mision:
 
 ### Como se construye un agente
 
-Cada agente se crea con `create_agent()` de LangChain, que recibe un LLM, herramientas y un prompt de sistema:
+Cada agente se crea con `create_agent()` de LangChain, que recibe un LLM, herramientas y un prompt de sistema. El prompt sale de la entrada de la persona en el registro:
 
 ```python
-# standard_graph.py:90-92
-agent_registry[agent_name] = create_agent(
-    llm,
-    tools=dom_tools,                          # Herramientas disponibles
-    system_prompt=SystemMessage(content=       # Personalidad del agente
-        make_browser_agent_prompt(role, app_context, focus)
+# orchestration/graph.py (build_graph)
+for persona in personas_for_tier(tier):
+    system_prompt = persona.system_prompt(            # Personalidad del agente
+        app_name=app.name, app_url=app.url,
+        app_description=app.description, supplement=supplement,  # memoria aprendida
     )
-)
+    agent_registry[persona.name] = create_agent(
+        llm,
+        tools=tools,                                  # Conjunto de herramientas compartido
+        system_prompt=SystemMessage(content=system_prompt),
+    )
 ```
 
 El prompt de sistema combina:
@@ -507,12 +512,13 @@ class MiEstado(TypedDict):
     nombre: str
 ```
 
-### En este proyecto: AgentState (graph_base.py:55)
+### En este proyecto: AgentState (graph_base.py)
 
 ```python
 class AgentState(TypedDict):
-    # Mensajes del chat. Reducer: operator.add -> se acumulan
-    messages: Annotated[Sequence[BaseMessage], operator.add]
+    # Mensajes del chat. Reducer: add_messages -> se acumulan, un id repetido reemplaza
+    # el mensaje y un RemoveMessage lo elimina
+    messages: Annotated[Sequence[BaseMessage], add_messages]
 
     # Nombre del siguiente agente. Sin reducer -> se sobreescribe
     next_agent: str
@@ -535,16 +541,17 @@ class AgentState(TypedDict):
 #### `messages` -- Historial de conversacion
 
 ```python
-messages: Annotated[Sequence[BaseMessage], operator.add]
+messages: Annotated[Sequence[BaseMessage], add_messages]
 ```
 
 - **Tipo:** Lista de `BaseMessage` (clase base de LangChain para mensajes)
-- **Reducer:** `operator.add` -- cada nodo puede agregar mensajes y estos se concatenan al historial existente
+- **Reducer:** `add_messages` -- cada nodo puede agregar mensajes y estos se anaden al historial; un mensaje cuyo `id` ya existe lo reemplaza, y un `RemoveMessage(id=...)` lo elimina. Eso es lo que permite al Summarizer reducir de verdad el historial: con un `operator.add` simple los `RemoveMessage` se anadian en lugar de borrar nada, y el historial crecia sin limite.
+- **Los nodos de agente devuelven solo lo que produjeron.** Un agente compilado devuelve su entrada mas sus mensajes nuevos; devolverlo todo volvia a anadir el historial entero en cada turno y volvia a extraer todos los bugs anteriores.
 - **Subtipos de mensaje usados:**
   - `HumanMessage`: La mision del usuario o directivas del supervisor
   - `AIMessage`: Respuestas/razonamiento del LLM
   - `ToolMessage`: Resultados de herramientas ejecutadas
-  - `SystemMessage`: Instrucciones del sistema o resumenes comprimidos
+  - `SystemMessage`: Instrucciones del sistema (el resumen comprimido del Summarizer es un `HumanMessage`)
   - `RemoveMessage`: Mensaje especial para eliminar mensajes del historial (usado por el Summarizer)
 
 #### `next_agent` -- Enrutamiento
@@ -590,7 +597,7 @@ bugs_found: Annotated[List[str], operator.add]
 explored_paths: Annotated[List[str], operator.add]
 ```
 
-- Ambos usan `operator.add` para acumular datos de todas las iteraciones
+- Ambos usan `operator.add` para acumular datos de todas las iteraciones. Cada nodo devuelve solo el **delta** (lo que encontro en este turno) y el reducer lo concatena
 - Alimentan el contexto del Supervisor para evitar redundancia y guiar la exploracion
 
 > **Documentacion oficial sobre estado y reducers:** [docs.langchain.com/oss/python/langgraph/graph-api](https://docs.langchain.com/oss/python/langgraph/graph-api)
@@ -1039,23 +1046,24 @@ async def mi_nodo(state, *, store=None):
 El proyecto usa **ambos** mecanismos:
 
 ```python
-# main.py (simplificado)
+# main.py (simplificado): ambos comparten el mismo fichero SQLite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.store.memory import AsyncSqliteStore  # Store con SQLite
+from langgraph.store.sqlite import AsyncSqliteStore
 
-async with AsyncSqliteSaver.from_conn_string("checkpoints.db") as checkpointer:
-    async with AsyncSqliteStore.from_conn_string("memory.db") as store:
+async with AsyncSqliteSaver.from_conn_string("agent_memory.sqlite") as checkpointer:
+    async with AsyncSqliteStore.from_conn_string("agent_memory.sqlite") as store:
         graph = await build_graph(
             ...,
+            tier="standard",
             checkpointer=checkpointer,
             store=store,
         )
 ```
 
-| Mecanismo | Base de datos | Que guarda | Ciclo de vida |
+| Mecanismo | Tablas en `agent_memory.sqlite` | Que guarda | Ciclo de vida |
 |---|---|---|---|
-| Checkpointer | `checkpoints.db` | Estado del grafo en cada paso | Por mision (thread_id) |
-| Store | `memory.db` | Conocimiento aprendido | Permanente (entre sesiones) |
+| Checkpointer | `checkpoints`, `writes` | Estado del grafo en cada paso | Por mision (thread_id) |
+| Store | `store`, `store_vectors` | Conocimiento aprendido (y sus embeddings) | Permanente (entre sesiones) |
 
 ---
 
@@ -1211,16 +1219,24 @@ La memoria procedural almacena **que funciono y que no** para mejorar las futura
 Despues de ejecutar todas las misiones de un batch, el sistema usa el **prompt optimizer de Langmem** (`create_prompt_optimizer(kind="prompt_memory")`) para reflexionar sobre los resultados. El optimizer recibe los resumenes de sesiones como trayectorias y genera prompts optimizados para cada agente y para las reglas de routing del supervisor.
 
 ```python
-from langmem import create_prompt_optimizer
+# memory_backends.py -- el unico modulo que importa langmem (de forma diferida)
+class LangmemOptimizer:
+    def __init__(self, llm):
+        import langmem
+        self._optimizer = langmem.create_prompt_optimizer(llm, kind="prompt_memory")
 
-optimizer = create_prompt_optimizer(llm, kind="prompt_memory")
+    async def optimize(self, prompt, trajectory, *, context):
+        result = await self._optimizer.ainvoke({
+            "trajectories": [(list(trajectory), {"context": context})],
+            "prompt": prompt,
+        })
+        return result if isinstance(result, str) else str(result)
 
-# Para cada agente, optimiza su prompt basandose en las trayectorias
-optimized = await optimizer.ainvoke({
-    "trajectories": [(trajectory_messages, {"context": "batch review"})],
-    "prompt": current_agent_prompt,
-})
+# memory.py -- update_procedural_memory acepta cualquier PromptOptimizer
+optimized = await optimizer.optimize(base_prompt, trajectory_messages, context="batch review")
 ```
+
+Cada mision se atribuye a la persona que nombra su `thread_id` (`persona_for_thread_id`). Las sesiones se guardan bajo el thread id pero los agentes leen su suplemento por nombre de persona, asi que aprender bajo el thread id nunca se leeria despues. Las misiones cuyos ids no siguen ninguna convencion de persona (p. ej. `smoke_checkout_01`) alimentan solo las reglas de routing. Si falla la optimizacion de un prompt, se registra y se cuenta, y las demas personas siguen aprendiendo.
 
 El optimizer analiza los resultados y genera prompts mejorados que se inyectan en los agentes en la siguiente ejecucion:
 
@@ -1408,6 +1424,7 @@ Una mision es un archivo YAML que describe que testear en lenguaje natural:
 # missions/new_user_agent.yaml
 missions:
   - thread_id: "test_onboarding_01"
+    graph: standard
     prompt: >
       You are testing the application for the first time.
       Navigate to the login page, explore the main dashboard,
@@ -1415,6 +1432,7 @@ missions:
       Focus on discoverability of features.
 
   - thread_id: "test_onboarding_02"
+    graph: standard
     prompt: >
       Test the signup flow as a completely new user.
       Try creating an account with various input combinations.
@@ -1422,9 +1440,19 @@ missions:
 
 ### Enrutamiento: Standard vs. Advanced
 
-El `thread_id` determina que grafo se usa (main.py:41):
+Una mision indica su grafo con el campo `graph:`, que resuelve `resolve_tier()` en `orchestration/personas.py` antes de arrancar ningun navegador (un valor invalido falla enseguida):
+
+```yaml
+- thread_id: "test_accessibility_forms"
+  graph: advanced        # o: standard
+  prompt: >
+    ...
+```
+
+Sin `graph:`, el nivel se deduce del `thread_id`. Ese mecanismo esta **obsoleto** y muestra un aviso:
 
 ```python
+# orchestration/personas.py -- derivado de las palabras clave de las personas avanzadas
 ADVANCED_KEYWORDS = (
     "accessibility", "a11y",
     "data_heavy", "data-heavy",
@@ -1433,14 +1461,16 @@ ADVANCED_KEYWORDS = (
     "explorer", "chaos", "autonomous",
 )
 
-# Si el thread_id contiene alguna de estas palabras -> grafo avanzado
+# Si el thread_id contiene alguna de estas palabras (subcadena simple) -> grafo avanzado
 # Si no -> grafo estandar (3 personas)
 ```
 
-Ejemplo:
-- `thread_id: "test_login_01"` -> **Grafo estandar** (3 agentes)
-- `thread_id: "test_accessibility_forms"` -> **Grafo avanzado** (5 agentes + explorador)
-- `thread_id: "chaos_navigation_stress"` -> **Grafo avanzado**
+Como es una coincidencia de subcadena simple, un id como `test_new_user_explorer_notes` se ejecutaria en el grafo avanzado. Define `graph:` de forma explicita para evitar sorpresas. Las misiones generadas desde un PR siempre llevan `graph:`.
+
+Ejemplos:
+- `graph: standard` -> **Grafo estandar** (3 agentes)
+- `graph: advanced` -> **Grafo avanzado** (4 personas + explorador)
+- sin `graph:`, `thread_id: "chaos_navigation_stress"` -> **Grafo avanzado** (deduccion obsoleta, con aviso)
 
 ### Misiones de Regresion
 
@@ -1561,9 +1591,9 @@ def _build_diff_excerpt(diff_text, budget):
 5. Inicializa Playwright (browser, contexto, pagina)
    |
    v
-6. Inicializa persistencia:
-   |-- AsyncSqliteSaver (checkpoints.db)
-   |-- AsyncSqliteStore (memory.db)
+6. Inicializa persistencia (un unico fichero SQLite, agent_memory.sqlite):
+   |-- AsyncSqliteSaver (checkpoints)
+   |-- AsyncSqliteStore (memoria a largo plazo)
    |
    v
 7. Carga herramientas:
@@ -1571,16 +1601,17 @@ def _build_diff_excerpt(diff_text, budget):
    |-- Agent Skills (agent-skills/)
    |
    v
-8. Para cada mision en el YAML:
+7b. Construye ambos grafos una vez: build_graph(tier="standard") y build_graph(tier="advanced"):
+   |-- Crear agentes con prompts personalizados (desde el registro de personas)
+   |-- Cargar suplementos de memoria procedural
+   |-- Compilar StateGraph con checkpointer + store, timeouts de nodo y manejo de fallos
    |
-   |  8a. Determinar grafo (standard vs. advanced) por keywords
+   v
+8. Para cada mision en el YAML (un Ctrl-C detiene en un punto seguro; relanza para reanudar):
+   |
+   |  8a. Elegir el grafo segun el campo `graph:` de la mision
    |      |
-   |  8b. build_graph() o build_advanced_graph():
-   |      |-- Crear agentes con prompts personalizados
-   |      |-- Cargar suplementos de memoria procedural
-   |      |-- Compilar StateGraph con checkpointer + store
-   |      |
-   |  8c. Ejecutar con astream():
+   |  8b. Ejecutar con astream(version="v2"):
    |      |
    |      |  CICLO DEL GRAFO:
    |      |  +--> SUPERVISOR
@@ -1601,13 +1632,16 @@ def _build_diff_excerpt(diff_text, budget):
    |      |  +--> SUMMARIZER
    |      |       - Si hay muchos mensajes, comprime los viejos
    |      |       - Mantiene: primer HumanMessage + 20 recientes
-   |      |       - Reemplaza el medio con un SystemMessage resumen
+   |      |       - Reemplaza el medio con UN HumanMessage resumen,
+   |      |         colocado justo despues del prompt de la mision
    |      |
    |      |  (REPITE hasta FINISH o error)
+   |      |  Un agente sin actividad durante node_idle_timeout_s se cancela y se
+   |      |  reintenta; si sigue fallando, el supervisor recibe un mensaje [NODE FAILED].
    |      |
-   |  8d. Generar reporte (LLM resume el transcript)
+   |  8c. Generar reporte (LLM resume el transcript)
    |      |
-   |  8e. Escribir memoria episodica:
+   |  8d. Escribir memoria episodica (un fallo se registra y se cuenta, nunca es silencioso):
    |      |-- Session summary
    |      |-- Bug catalog (deduplicado)
    |
@@ -1619,7 +1653,7 @@ def _build_diff_excerpt(diff_text, budget):
    v
 10. Artefactos generados por mision:
     report_{thread_id}/
-    |-- traces.log              # Transcript completo
+    |-- traces.log              # Transcript completo (se amplia, con una marca, al reanudar)
     |-- test_report.md          # Reporte ejecutivo generado por LLM
     |-- action_tape.jsonl       # Log inmutable de acciones
     |-- reproduction_*.spec.ts  # Scripts Playwright reproducibles
@@ -1628,26 +1662,31 @@ def _build_diff_excerpt(diff_text, budget):
 
 ### Manejo de errores transitorios
 
-El sistema implementa **retry con backoff exponencial** para errores transitorios (main.py):
+Los errores transitorios de la API (503, 429 / limites de uso, cuota, 529 "overloaded") se reintentan con **backoff** mediante `with_retry()` en `runtime/retry.py`. Envuelve tanto el stream completo de la mision como la generacion del reporte:
 
 ```python
-def _is_transient_error(exc):
-    """Detecta errores recuperables."""
-    text = str(exc).lower()
-    return any(k in text for k in ("rate limit", "429", "503", "overloaded"))
-
-# En el loop de ejecucion:
-for attempt in range(max_retries):
-    try:
-        async for snapshot in graph.astream(state, config):
-            ...
-    except Exception as exc:
-        if _is_transient_error(exc) and attempt < max_retries - 1:
-            wait = 2 ** attempt * 5  # 5s, 10s, 20s, 40s...
-            await asyncio.sleep(wait)
-            continue
-        raise
+async def with_retry(fn, *, max_attempts=5, base_delay=2, ...):
+    for attempt in range(max_attempts):
+        try:
+            return await fn()
+        except Exception as exc:
+            if not is_transient_error(exc):
+                raise                                # un fallo real: no se reintenta
+            if attempt >= max_attempts - 1:
+                raise                                # sin mas intentos
+            # 2s, 4s, 8s... ; un limite de uso espera 30s + 15s * intento (+ jitter)
+            await asyncio.sleep(retry_delay(attempt, exc, base_delay))
 ```
+
+Un stream de mision reintentado **se reanuda desde el checkpoint** (`initial_state=None`) en lugar de empezar de cero.
+
+### Timeouts de nodo, fallos y parada limpia
+
+Otras tres capas rodean al grafo (`orchestration/resilience.py`, `runtime/drain.py`):
+
+1. **Timeout por inactividad.** Cada agente y el supervisor se registran con `timeout=TimeoutPolicy(idle_timeout=...)` (`config.yaml` > `runtime.node_idle_timeout_s`, 300 s por defecto). Cualquier llamada al LLM o a una herramienta que empiece o termine dentro del nodo renueva el temporizador, asi que un turno largo pero sano nunca se corta; solo se cancela un navegador o una peticion colgados. Un nodo que agoto el tiempo se reintenta `node_retries` veces.
+2. **Manejo de fallos.** Un agente que sigue fallando se convierte en un mensaje `[NODE FAILED]` y el control vuelve al supervisor (pasando por el Summarizer), que puede elegir otro enfoque. Los errores transitorios de la API se **relanzan** a proposito, para que sigan aplicando las esperas largas de `with_retry`.
+3. **Parada limpia.** El primer Ctrl-C (o SIGTERM) llama a `RunControl.request_drain()`: el paso en curso termina, se guarda el checkpoint, se lanza `GraphDrained` y el proceso sale con estado 130. Ejecutar el mismo comando otra vez reanuda la mision sin repetir el paso ya terminado. Un segundo Ctrl-C aborta al instante.
 
 ---
 
@@ -1708,6 +1747,18 @@ def get_browser_command_tool(page: Page):  # page capturada en closure
 - Diff de PRs: 40KB con distribucion por archivo
 - Mensajes del supervisor: compactados a una linea por mensaje
 - Memoria: limitada a las N entradas mas relevantes
+
+### 8. Memoria "best-effort" que nunca es silenciosa
+
+**Problema:** Un almacen de memoria roto no debe abortar una mision, pero tragarse el error (`except Exception: pass`) permitia que una mision corriera una hora sin aprender nada y que nadie lo supiera.
+
+**Solucion:** Toda operacion de memoria que pueda fallar pasa por `guarded()` (`memory_health.py`): mantiene la mision en marcha, registra el traceback en el logger `agentic_explorer.memory`, cuenta el fallo y avisa por consola una vez por tipo. El reporte de la mision muestra un contador `Memory errors`.
+
+### 9. Dependencias reemplazables detras de adaptadores
+
+**Problema:** `langmem` no publica version desde oct. 2025 y al importarlo arrastra un import de LangGraph que LangGraph 2.0 elimina.
+
+**Solucion:** Solo `memory_backends.py` lo importa, de forma diferida, detras de un protocolo `PromptOptimizer` pequeno y una fabrica de la herramienta de observaciones. Reemplazarlo es un cambio en un unico fichero, y la logica de memoria se prueba con un optimizador falso.
 
 ---
 

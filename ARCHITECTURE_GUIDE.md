@@ -335,11 +335,13 @@ workflow.add_conditional_edges(
 
 The project defines three node factories in `graph_base.py`:
 
-| Factory | File:Line | Purpose |
+| Factory | File | Purpose |
 |---|---|---|
-| `make_agent_node()` | graph_base.py:245 | Wraps a compiled agent as a LangGraph node |
-| `make_supervisor_node()` | graph_base.py:291 | Creates the supervisor node that routes to the next agent |
-| `make_summarizer_node()` | graph_base.py:386 | Compresses messages to prevent context overflow |
+| `make_agent_node()` | graph_base.py | Wraps a compiled agent as a LangGraph node |
+| `make_supervisor_node()` | graph_base.py | Creates the supervisor node that routes to the next agent |
+| `make_summarizer_node()` | graph_base.py | Compresses messages to prevent context overflow (keeps the mission prompt and the 20 most recent; one deterministic summary in between, placed right after the mission prompt) |
+
+Per-node timeouts, retries and failure handling are attached when the nodes are registered (`orchestration/resilience.py`); see section 15.
 
 > **Official documentation on conditional edges:** [reference.langchain.com/python/langgraph/graph/state/StateGraph/add_conditional_edges](https://reference.langchain.com/python/langgraph/graph/state/StateGraph/add_conditional_edges)
 
@@ -442,9 +444,9 @@ def make_supervisor_node(llm, agent_names, app_url, max_steps, ...):
 
 ### The Two Graph Types
 
-The project defines two graphs depending on mission complexity:
+The project defines two graphs ("tiers") depending on mission complexity. Both are built by the same function, `build_graph(..., tier=...)` in `orchestration/graph.py`, from the single persona registry in `orchestration/personas.py` (`PERSONAS`). Each mission names its tier with a `graph:` field (see section 13).
 
-#### Standard Graph (standard_graph.py): 3 Personas
+#### Standard tier: 3 Personas
 
 | Agent | Role | Focus |
 |---|---|---|
@@ -452,7 +454,7 @@ The project defines two graphs depending on mission complexity:
 | `power_user_agent` | Power User | Shortcuts, bulk operations, advanced filters |
 | `adversarial_user_agent` | Chaos Monkey | Invalid inputs, SQL injection, rapid clicking |
 
-#### Advanced Graph (advanced_graph.py): 5 Personas + Explorer
+#### Advanced tier: 5 agents (4 personas + the autonomous Explorer)
 
 | Agent | Role | Focus |
 |---|---|---|
@@ -464,17 +466,20 @@ The project defines two graphs depending on mission complexity:
 
 ### How an Agent Is Built
 
-Each agent is created with LangChain's `create_agent()`, which receives an LLM, tools, and a system prompt:
+Each agent is created with LangChain's `create_agent()`, which receives an LLM, tools, and a system prompt. The prompt comes from the persona's entry in the registry:
 
 ```python
-# standard_graph.py:90-92
-agent_registry[agent_name] = create_agent(
-    llm,
-    tools=dom_tools,                          # Available tools
-    system_prompt=SystemMessage(content=       # Agent personality
-        make_browser_agent_prompt(role, app_context, focus)
+# orchestration/graph.py (build_graph)
+for persona in personas_for_tier(tier):
+    system_prompt = persona.system_prompt(            # Agent personality
+        app_name=app.name, app_url=app.url,
+        app_description=app.description, supplement=supplement,  # learned memory
     )
-)
+    agent_registry[persona.name] = create_agent(
+        llm,
+        tools=tools,                                  # Shared tool bundle
+        system_prompt=SystemMessage(content=system_prompt),
+    )
 ```
 
 The system prompt combines:
@@ -507,12 +512,13 @@ class MyState(TypedDict):
     name: str
 ```
 
-### In This Project: AgentState (graph_base.py:55)
+### In This Project: AgentState (graph_base.py)
 
 ```python
 class AgentState(TypedDict):
-    # Chat messages. Reducer: operator.add -> they accumulate
-    messages: Annotated[Sequence[BaseMessage], operator.add]
+    # Chat messages. Reducer: add_messages -> they accumulate, a repeated id replaces
+    # the message, and a RemoveMessage deletes it
+    messages: Annotated[Sequence[BaseMessage], add_messages]
 
     # Name of the next agent. No reducer -> overwritten
     next_agent: str
@@ -535,16 +541,17 @@ class AgentState(TypedDict):
 #### `messages` -- Conversation History
 
 ```python
-messages: Annotated[Sequence[BaseMessage], operator.add]
+messages: Annotated[Sequence[BaseMessage], add_messages]
 ```
 
 - **Type:** List of `BaseMessage` (LangChain's base class for messages)
-- **Reducer:** `operator.add` -- each node can add messages and they are concatenated to the existing history
+- **Reducer:** `add_messages` -- each node can add messages and they are appended to the history; a message whose `id` already exists replaces it, and a `RemoveMessage(id=...)` deletes it. That is what lets the Summarizer actually shrink the history: with a plain `operator.add` the `RemoveMessage` entries were appended instead of deleting anything, and the history grew without bound.
+- **Agent nodes return only what they produced.** A compiled agent streams back its input plus its new messages; returning all of it re-added the whole history on every turn and re-extracted every earlier bug.
 - **Message subtypes used:**
   - `HumanMessage`: The user's mission or supervisor directives
   - `AIMessage`: LLM responses/reasoning
   - `ToolMessage`: Results of executed tools
-  - `SystemMessage`: System instructions or compressed summaries
+  - `SystemMessage`: System instructions (the Summarizer's compressed summary is a `HumanMessage`)
   - `RemoveMessage`: Special message for deleting messages from the history (used by the Summarizer)
 
 #### `next_agent` -- Routing
@@ -590,7 +597,7 @@ bugs_found: Annotated[List[str], operator.add]
 explored_paths: Annotated[List[str], operator.add]
 ```
 
-- Both use `operator.add` to accumulate data from all iterations
+- Both use `operator.add` to accumulate data from all iterations. Each node returns only the **delta** (what it found this turn) and the reducer concatenates
 - They feed the Supervisor's context to avoid redundancy and guide exploration
 
 > **Official documentation on state and reducers:** [docs.langchain.com/oss/python/langgraph/graph-api](https://docs.langchain.com/oss/python/langgraph/graph-api)
@@ -1039,23 +1046,24 @@ async def my_node(state, *, store=None):
 The project uses **both** mechanisms:
 
 ```python
-# main.py (simplified)
+# main.py (simplified): both share the same SQLite file
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.store.memory import AsyncSqliteStore  # Store with SQLite
+from langgraph.store.sqlite import AsyncSqliteStore
 
-async with AsyncSqliteSaver.from_conn_string("checkpoints.db") as checkpointer:
-    async with AsyncSqliteStore.from_conn_string("memory.db") as store:
+async with AsyncSqliteSaver.from_conn_string("agent_memory.sqlite") as checkpointer:
+    async with AsyncSqliteStore.from_conn_string("agent_memory.sqlite") as store:
         graph = await build_graph(
             ...,
+            tier="standard",
             checkpointer=checkpointer,
             store=store,
         )
 ```
 
-| Mechanism | Database | What It Stores | Lifecycle |
+| Mechanism | Tables in `agent_memory.sqlite` | What It Stores | Lifecycle |
 |---|---|---|---|
-| Checkpointer | `checkpoints.db` | Graph state at each step | Per mission (thread_id) |
-| Store | `memory.db` | Learned knowledge | Permanent (across sessions) |
+| Checkpointer | `checkpoints`, `writes` | Graph state at each step | Per mission (thread_id) |
+| Store | `store`, `store_vectors` | Learned knowledge (and its embeddings) | Permanent (across sessions) |
 
 ---
 
@@ -1211,16 +1219,24 @@ Procedural memory stores **what worked and what did not** to improve future sess
 After executing all missions in a batch, the system uses the **Langmem prompt optimizer** (`create_prompt_optimizer(kind="prompt_memory")`) to reflect on the results. The optimizer receives session summaries as trajectories and generates optimized prompts for each agent and for the supervisor's routing rules.
 
 ```python
-from langmem import create_prompt_optimizer
+# memory_backends.py -- the only module that imports langmem (lazily)
+class LangmemOptimizer:
+    def __init__(self, llm):
+        import langmem
+        self._optimizer = langmem.create_prompt_optimizer(llm, kind="prompt_memory")
 
-optimizer = create_prompt_optimizer(llm, kind="prompt_memory")
+    async def optimize(self, prompt, trajectory, *, context):
+        result = await self._optimizer.ainvoke({
+            "trajectories": [(list(trajectory), {"context": context})],
+            "prompt": prompt,
+        })
+        return result if isinstance(result, str) else str(result)
 
-# For each agent, optimize its prompt based on the trajectories
-optimized = await optimizer.ainvoke({
-    "trajectories": [(trajectory_messages, {"context": "batch review"})],
-    "prompt": current_agent_prompt,
-})
+# memory.py -- update_procedural_memory accepts any PromptOptimizer
+optimized = await optimizer.optimize(base_prompt, trajectory_messages, context="batch review")
 ```
+
+Each mission is attributed to the persona its `thread_id` names (`persona_for_thread_id`). Sessions are stored under the thread id but agents read their supplement by persona name, so learning under the thread id would never be read back. Missions whose ids follow no persona convention (e.g. `smoke_checkout_01`) feed only the routing rules. A failure to optimize one prompt is logged and counted, and the other personas still learn.
 
 The optimizer analyzes the results and generates improved prompts that are injected into the agents on the next execution:
 
@@ -1408,6 +1424,7 @@ A mission is a YAML file that describes what to test in natural language:
 # missions/new_user_agent.yaml
 missions:
   - thread_id: "test_onboarding_01"
+    graph: standard
     prompt: >
       You are testing the application for the first time.
       Navigate to the login page, explore the main dashboard,
@@ -1415,6 +1432,7 @@ missions:
       Focus on discoverability of features.
 
   - thread_id: "test_onboarding_02"
+    graph: standard
     prompt: >
       Test the signup flow as a completely new user.
       Try creating an account with various input combinations.
@@ -1422,9 +1440,19 @@ missions:
 
 ### Routing: Standard vs. Advanced
 
-The `thread_id` determines which graph is used (main.py:41):
+A mission names its graph with the `graph:` field, resolved by `resolve_tier()` in `orchestration/personas.py` before any browser starts (an invalid value fails fast):
+
+```yaml
+- thread_id: "test_accessibility_forms"
+  graph: advanced        # or: standard
+  prompt: >
+    ...
+```
+
+Without `graph:`, the tier is inferred from the `thread_id`. That fallback is **deprecated** and prints a warning:
 
 ```python
+# orchestration/personas.py -- derived from the advanced personas' keywords
 ADVANCED_KEYWORDS = (
     "accessibility", "a11y",
     "data_heavy", "data-heavy",
@@ -1433,14 +1461,16 @@ ADVANCED_KEYWORDS = (
     "explorer", "chaos", "autonomous",
 )
 
-# If the thread_id contains any of these words -> advanced graph
+# If the thread_id contains any of these words (plain substring) -> advanced graph
 # Otherwise -> standard graph (3 personas)
 ```
 
+Because it is a plain substring match, an id such as `test_new_user_explorer_notes` would run on the advanced graph. Set `graph:` explicitly to avoid surprises. Missions generated from a PR always carry `graph:`.
+
 Examples:
-- `thread_id: "test_login_01"` -> **Standard graph** (3 agents)
-- `thread_id: "test_accessibility_forms"` -> **Advanced graph** (5 agents + explorer)
-- `thread_id: "chaos_navigation_stress"` -> **Advanced graph**
+- `graph: standard` -> **Standard graph** (3 agents)
+- `graph: advanced` -> **Advanced graph** (4 personas + explorer)
+- no `graph:`, `thread_id: "chaos_navigation_stress"` -> **Advanced graph** (deprecated inference, with a warning)
 
 ### Regression Missions
 
@@ -1561,9 +1591,9 @@ def _build_diff_excerpt(diff_text, budget):
 5. Initializes Playwright (browser, context, page)
    |
    v
-6. Initializes persistence:
-   |-- AsyncSqliteSaver (checkpoints.db)
-   |-- AsyncSqliteStore (memory.db)
+6. Initializes persistence (one SQLite file, agent_memory.sqlite):
+   |-- AsyncSqliteSaver (checkpoints)
+   |-- AsyncSqliteStore (long-term memory)
    |
    v
 7. Loads tools:
@@ -1571,16 +1601,17 @@ def _build_diff_excerpt(diff_text, budget):
    |-- Agent Skills (agent-skills/)
    |
    v
-8. For each mission in the YAML:
+7b. Builds both graphs once: build_graph(tier="standard") and build_graph(tier="advanced"):
+   |-- Create agents with personalized prompts (from the persona registry)
+   |-- Load procedural memory supplements
+   |-- Compile StateGraph with checkpointer + store, node timeouts and failure handlers
    |
-   |  8a. Determine graph (standard vs. advanced) by keywords
+   v
+8. For each mission in the YAML (Ctrl-C once stops at a safe point; rerun to resume):
+   |
+   |  8a. Pick the graph from the mission's `graph:` field
    |      |
-   |  8b. build_graph() or build_advanced_graph():
-   |      |-- Create agents with personalized prompts
-   |      |-- Load procedural memory supplements
-   |      |-- Compile StateGraph with checkpointer + store
-   |      |
-   |  8c. Execute with astream():
+   |  8b. Execute with astream(version="v2"):
    |      |
    |      |  GRAPH CYCLE:
    |      |  +--> SUPERVISOR
@@ -1601,13 +1632,16 @@ def _build_diff_excerpt(diff_text, budget):
    |      |  +--> SUMMARIZER
    |      |       - If there are many messages, compresses the old ones
    |      |       - Keeps: first HumanMessage + 20 most recent
-   |      |       - Replaces the middle with a summary SystemMessage
+   |      |       - Replaces the middle with ONE summary HumanMessage,
+   |      |         placed right after the mission prompt
    |      |
    |      |  (REPEATS until FINISH or error)
+   |      |  An agent with no activity for node_idle_timeout_s is cancelled and
+   |      |  retried; if it still fails, the supervisor gets a [NODE FAILED] message.
    |      |
-   |  8d. Generate report (LLM summarizes the transcript)
+   |  8c. Generate report (LLM summarizes the transcript)
    |      |
-   |  8e. Write episodic memory:
+   |  8d. Write episodic memory (a failure is logged and counted, never silent):
    |      |-- Session summary
    |      |-- Bug catalog (deduplicated)
    |
@@ -1619,7 +1653,7 @@ def _build_diff_excerpt(diff_text, budget):
    v
 10. Artifacts generated per mission:
     report_{thread_id}/
-    |-- traces.log              # Complete transcript
+    |-- traces.log              # Complete transcript (appended, with a marker, on resume)
     |-- test_report.md          # Executive report generated by LLM
     |-- action_tape.jsonl       # Immutable action log
     |-- reproduction_*.spec.ts  # Reproducible Playwright scripts
@@ -1628,26 +1662,31 @@ def _build_diff_excerpt(diff_text, budget):
 
 ### Transient Error Handling
 
-The system implements **retry with exponential backoff** for transient errors (main.py):
+Transient API errors (503, 429 / rate limits, quota, 529 "overloaded") are retried with **backoff** by `with_retry()` in `runtime/retry.py`. It wraps both the whole mission stream and the report generation:
 
 ```python
-def _is_transient_error(exc):
-    """Detects recoverable errors."""
-    text = str(exc).lower()
-    return any(k in text for k in ("rate limit", "429", "503", "overloaded"))
-
-# In the execution loop:
-for attempt in range(max_retries):
-    try:
-        async for snapshot in graph.astream(state, config):
-            ...
-    except Exception as exc:
-        if _is_transient_error(exc) and attempt < max_retries - 1:
-            wait = 2 ** attempt * 5  # 5s, 10s, 20s, 40s...
-            await asyncio.sleep(wait)
-            continue
-        raise
+async def with_retry(fn, *, max_attempts=5, base_delay=2, ...):
+    for attempt in range(max_attempts):
+        try:
+            return await fn()
+        except Exception as exc:
+            if not is_transient_error(exc):
+                raise                                # a real bug: do not retry
+            if attempt >= max_attempts - 1:
+                raise                                # out of attempts
+            # 2s, 4s, 8s... ; a rate limit waits 30s + 15s * attempt (+ jitter)
+            await asyncio.sleep(retry_delay(attempt, exc, base_delay))
 ```
+
+A retried mission stream **resumes from the checkpoint** (`initial_state=None`) instead of starting over.
+
+### Node Timeouts, Failures and Graceful Stop
+
+Three more layers sit around the graph (`orchestration/resilience.py`, `runtime/drain.py`):
+
+1. **Idle timeout.** Every agent and the supervisor are registered with `timeout=TimeoutPolicy(idle_timeout=...)` (`config.yaml` > `runtime.node_idle_timeout_s`, 300 s by default). Any LLM or tool call starting or finishing inside the node renews the timer, so a long but healthy turn is never cut; only a hung browser or request is cancelled. A node that timed out is retried `node_retries` times.
+2. **Failure handler.** An agent that still fails becomes a `[NODE FAILED]` message and control returns to the supervisor (through the Summarizer), which can pick another approach. Transient API errors are deliberately **re-raised** instead, so the long waits of `with_retry` still apply.
+3. **Graceful stop.** The first Ctrl-C (or SIGTERM) calls `RunControl.request_drain()`: the step in progress finishes, the checkpoint is saved, `GraphDrained` is raised and the process exits with status 130. Running the same command again resumes the mission without repeating the finished step. A second Ctrl-C aborts immediately.
 
 ---
 
@@ -1708,6 +1747,18 @@ def get_browser_command_tool(page: Page):  # page captured in closure
 - PR diffs: 40KB with per-file distribution
 - Supervisor messages: compacted to one line per message
 - Memory: limited to the N most relevant entries
+
+### 8. Best-Effort Memory That Is Never Silent
+
+**Problem:** A broken memory store must not abort a mission, but swallowing the error (`except Exception: pass`) meant a mission could run for an hour without learning anything and nobody would know.
+
+**Solution:** Every memory operation that may fail goes through `guarded()` (`memory_health.py`): it keeps the mission going, logs the traceback to the `agentic_explorer.memory` logger, counts the failure, and warns on the console once per kind. The mission report shows a `Memory errors` count.
+
+### 9. Replaceable Dependencies Behind Adapters
+
+**Problem:** `langmem` has not been released since Oct 2025 and importing it pulls a LangGraph import that LangGraph 2.0 removes.
+
+**Solution:** Only `memory_backends.py` imports it, lazily, behind a small `PromptOptimizer` protocol and an observation-tool factory. Replacing it is a change to one file, and the memory logic is tested with a fake optimizer.
 
 ---
 
