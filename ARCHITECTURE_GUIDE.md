@@ -661,11 +661,11 @@ The project defines several specialized tools, all as factory functions that cap
 
 #### Browser Tools (engine.py)
 
-| Tool | File:Line | Description |
+| Tool | File | Description |
 |---|---|---|
-| `execute_browser_command` | engine.py:419 | Executes ONE JSON action in the browser |
-| `get_dom_snapshot` | engine.py:498 | Reads the current DOM (read-only) |
-| `generate_reproduction_spec` | engine.py:609 | Generates a .spec.ts from the Action Tape |
+| `execute_browser_command` | engine.py | Executes ONE JSON action in the browser |
+| `get_dom_snapshot` | engine.py | Reads the current DOM (read-only) |
+| `generate_reproduction_spec` | engine.py | Generates a .spec.ts from the Action Tape |
 
 #### Capture Tools (custom_tools.py)
 
@@ -686,7 +686,7 @@ The project defines several specialized tools, all as factory functions that cap
 This is the most important tool in the project. Here is how it is built:
 
 ```python
-# engine.py:414
+# engine.py
 def get_browser_command_tool(page: Page):
     """Factory: captures the reference to the Playwright page."""
 
@@ -770,7 +770,7 @@ The project implements an architectural pattern called **Record-and-Translate**,
 
 ### Supported Actions
 
-The engine only accepts a fixed set of actions (engine.py:253):
+The engine only accepts a fixed set of actions (engine.py):
 
 ```python
 ALLOWED_ACTIONS = {
@@ -790,7 +790,7 @@ ALLOWED_ACTIONS = {
 
 ### Resilient Selector Policy
 
-One of the most important patterns in the project is **selector validation** (engine.py:305):
+One of the most important patterns in the project is **selector validation** (engine.py):
 
 ```python
 # REJECTED selectors (brittle, depend on DOM position):
@@ -812,7 +812,7 @@ _BRITTLE_SELECTOR_PATTERNS = re.compile(r"""
 
 ### DOM Extraction (Snapshot)
 
-For the agent to "see" the page, the engine extracts a compact DOM snapshot using two strategies (engine.py:172):
+For the agent to "see" the page, the engine extracts a compact DOM snapshot using two strategies (engine.py):
 
 #### Primary strategy: Playwright Accessibility Tree
 
@@ -859,34 +859,113 @@ Each entry contains:
     "result": "clicked [data-test-subj='saveBtn']",
     "error": null,
     "page_url": "https://app.example.com/settings",
-    "page_title": "Settings"
+    "page_title": "Settings",
+    "snapshot_ref": "snapshots/step_0007.txt"
 }
 ```
 
 ### .spec.ts Generation
 
-The Action Tape is translated into an executable Playwright script (engine.py:556):
+The Action Tape is translated into an executable Playwright script (`generate_playwright_spec` in `engine.py`). The header carries the provenance of the recording, a **setup check** runs first, and the recorded steps start after the `BUG STEPS` marker:
 
 ```typescript
-// Auto-generated reproduction for bug: Error banner on save
-// Generated: 2026-05-17 14:30:00
+/**
+ * Auto-generated reproduction for bug: Cart total ignores discount
+ * Mission thread_id: realrun_cart
+ *
+ * Provenance:
+ *   App revision: v1.4.2
+ *   Session recorded: 2026-11-25T18:22:25+00:00
+ *   auth.json sha256: 44136fa3...caaff8a (modified 2026-11-25T09:00:00+00:00)
+ *   Preconditions (starting data):
+ *     - logged in as standard_user with an empty cart
+ * ...
+ */
 import { test, expect } from '@playwright/test';
 
 test.use({ storageState: 'auth.json' });
 
-test('reproduce: Error banner on save', async ({ page }) => {
-    test.setTimeout(120_000);
-    await page.goto('https://app.example.com/settings');
-    await page.fill('[aria-label="Name"]', 'Test User');
-    await page.click('[data-test-subj="saveBtn"]');
-    // FAILED AT RECORD TIME: check_page_health
-    //   Error: HEALTH: ERROR - 1 error banner(s): Internal Server Error
+test('reproduce: Cart total ignores discount', async ({ page }) => {
+  test.setTimeout(120_000);
+  // --- SETUP CHECK (a failure here is NOT the bug) ---
+  ...                       // throws SETUP_FAILURE if the base URL does not load
+                            // or lands on a login page the recording never visited
+  // --- BUG STEPS ---
+  await page.goto('https://app.example.com/cart');
+  const _t = await page.locator('[data-test="total"]').first().innerText();
+  expect(_t).toContain('$96.00');   // the expected value, when the agent reported one
 });
 ```
 
-Actions that failed are included as **comments** to document the bug.
+Actions that failed at record time are included as **comments** to document the bug. Without an `expected` value the `extract_text` step keeps the weak "text exists" check and the observed value is left as a comment.
 
-> **Official Playwright documentation:** [playwright.dev/python](https://playwright.dev/python/)
+### Tape Provenance: `tape_meta.json`
+
+The tape records *what happened*; it did not record *where it happened*. A spec that fails before reaching the bug (expired session, missing data) used to look exactly like the bug. At the start of each mission `report_<thread_id>/tape_meta.json` is written **once** (a resumed mission keeps the header of its first run):
+
+```json
+{
+  "type": "header",
+  "thread_id": "realrun_cart",
+  "app_name": "Swag Labs (Sauce Demo)",
+  "app_url": "https://www.saucedemo.com/",
+  "app_revision": "v1.4.2",
+  "started_at": "2026-11-25T18:22:25+00:00",
+  "tool_version": "0.2.0",
+  "auth_state": {"path": "auth.json", "sha256": "44136f...", "modified": "2026-11-25T09:00:00+00:00"},
+  "seed": ["logged in as standard_user with an empty cart"]
+}
+```
+
+* It is a **sidecar file**, not a first line in `action_tape.jsonl`, so every reader of the tape keeps seeing actions only and old tapes need no migration.
+* `app_revision` comes from `--app-revision`, then the `APP_REVISION` variable, then `app.revision` in `config.yaml`. If none is given it is `null`: it is never guessed.
+* `auth.json` is only **fingerprinted** (SHA-256 and modification time); its content, cookies included, is never stored.
+* `seed` is `app.seed` from `config.yaml`: free-text preconditions that are copied to the header and the spec. It documents; it does not execute anything.
+
+### Reading a Failing Spec: SETUP_FAILURE or Reproduction
+
+```mermaid
+flowchart TD
+    R[Run the generated spec] --> S{Which error?}
+    S -- SETUP_FAILURE --> A[Not the bug: the session or the starting data differs from the recording]
+    A --> B[Refresh auth.json with agent-auth, check the preconditions in the header, run again]
+    S -- any other error --> C[The BUG STEPS ran: this is the reproduction]
+    S -- passes --> D[Not reproduced: compare the app revision and the data in the header]
+```
+
+Limits worth knowing: the redirect check recognises login pages by path (`/login`, `/signin`, `/sso`, `/auth`), so an app whose login lives at `/` is not detected. The recommended habit is to **run the spec once in a clean session before reporting a bug**; the framework does not do that for you.
+
+### What the Agent Saw: Step Snapshots
+
+After every command the engine shows the agent a compact DOM / accessibility snapshot. That exact text is saved as `report_<thread_id>/snapshots/step_NNNN.txt`, and the tape entry only carries `"snapshot_ref": "snapshots/step_0003.txt"`, so `action_tape.jsonl` stays small. Each snapshot is capped at 12,000 characters and only the last `AGENT_SNAPSHOT_KEEP` (default 200) are kept; `AGENT_SNAPSHOT_KEEP=0` turns the feature off. A reference to a pruned step points to a file that no longer exists.
+
+### Bug Evidence and the Uncertain Verdict
+
+The closing `<bugs_found>` block accepts four optional evidence fields next to `title`, `summary`, `location` and `severity` (old blocks without them remain valid):
+
+| Field | Meaning |
+|---|---|
+| `observed` | The exact value the agent saw |
+| `observed_at` | Where it was read: selector or region text, and URL |
+| `expected` | What it should have been |
+| `confidence` | `confirmed` (default) or `uncertain` |
+
+```json
+<bugs_found>[
+  {"title": "Cart total ignores discount", "summary": "Total shows the undiscounted price after SAVE20",
+   "location": "/cart", "severity": "major", "observed": "$120.00",
+   "observed_at": "[data-test=\"total\"] on /cart", "expected": "$96.00", "confidence": "confirmed"},
+  {"title": "Coupon may reject lowercase codes", "summary": "save20 seemed to do nothing",
+   "location": "/cart", "severity": "minor", "observed": "no change after save20", "confidence": "uncertain"}
+]</bugs_found>
+```
+
+* **`uncertain` is an honest answer**, and the prompt asks for it whenever the agent cannot tell a bug from intended behaviour. Any value of `confidence` other than `confirmed` is treated as `uncertain`: the parser never rounds up.
+* **State design:** `bugs_found` stays a list of `"title: summary"` strings holding **confirmed** findings only, so counts, memory writes and the dashboard keep their meaning. Findings that could not be confirmed live in `uncertain_findings`, and the evidence in `bug_evidence`, both `operator.add` fields matched to a bug through the same normalised key that deduplicates bugs (`orchestration/findings.py`).
+* **Report:** `test_report.md` lists each confirmed bug with *Observed / Expected / Where* (or `no observed value recorded`) and a separate **Not determined** section. These sections are rendered by code, not by the LLM.
+* **Dashboard:** the Bugs tab shows the same evidence and lists uncertain findings apart, never in the bug counter.
+* **Memory:** evidence is stored on the bug-catalog entry and enriches regression missions ("saw X; expected Y"). The bug fingerprint ignores it, so the same bug is still recognised with or without evidence. Uncertain findings are not catalogued.
+* **Spec:** `generate_reproduction_spec` accepts optional `observed` and `expected`; see above.
 
 ---
 
@@ -1669,7 +1748,9 @@ def _build_diff_excerpt(diff_text, budget):
     report_{thread_id}/
     |-- traces.log              # Complete transcript (appended, with a marker, on resume)
     |-- test_report.md          # Executive report generated by LLM
-    |-- action_tape.jsonl       # Immutable action log
+    |-- tape_meta.json          # Provenance: app revision, session, auth.json fingerprint, seed
+    |-- action_tape.jsonl       # Immutable action log (entries may carry snapshot_ref)
+    |-- snapshots/              # What the agent saw at each step (bounded)
     |-- reproduction_*.spec.ts  # Reproducible Playwright scripts
     |-- screenshots/            # Visual evidence of bugs
 ```

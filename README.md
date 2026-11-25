@@ -322,6 +322,12 @@ APP_URL="https://www.saucedemo.com/"
 APP_USERNAME="standard_user"
 APP_PASSWORD="secret_sauce"
 
+# Optional: revision of the app under test (commit, version, build id). Recorded in the tape header and in
+# generated specs. Overridden by --app-revision; falls back to app.revision in config.yaml.
+# APP_REVISION="v1.4.2"
+# Optional: how many per-step snapshots (what the agent saw) to keep per mission. Default 200; 0 turns them off.
+# AGENT_SNAPSHOT_KEEP="200"
+
 APP_CONFIG="./config.yaml"
 MCP_SERVERS_CONFIG="./mcp_servers.json"
 
@@ -358,6 +364,9 @@ app:
   name: "Swag Labs (Sauce Demo)"
   url: ${APP_URL}
   description: "Demo online shop: login, product inventory, cart and checkout."
+  # revision: "v1.4.2"   # optional; recorded in tape_meta.json (--app-revision / APP_REVISION override it)
+  # seed:                # optional preconditions, copied to the tape header and the generated spec
+  #   - "logged in as standard_user with an empty cart"
 
 auth:
   method: form
@@ -555,6 +564,9 @@ agent-explorer --missions missions/new_user_agent.yaml --clear-learned
 # Override the supervisor step limit (default: 30)
 agent-explorer --missions missions/new_user_agent.yaml --max-steps 50
 
+# Record which revision of the app is under test (tape header and spec header)
+agent-explorer --missions missions/new_user_agent.yaml --app-revision "$(git -C ../my-app rev-parse --short HEAD)"
+
 # Suppress verbose ReAct console output (traces.log still captures everything)
 agent-explorer --missions missions/new_user_agent.yaml --quiet
 ```
@@ -627,13 +639,49 @@ For every mission, the framework generates a `report_<thread_id>/` directory con
    actions, bugs, Action Tape stats, PASS/FAIL), plus a `Memory errors` count when a
    long-term memory operation failed.
 3. **`action_tape.jsonl`** — Line-delimited JSON log of every deterministic browser
-   command. The source for reproduction scripts.
+   command. The source for reproduction scripts. Each entry may carry a `snapshot_ref`.
+   Next to it, **`tape_meta.json`** records where the tape came from (see
+   [Provenance and Evidence](#provenance-and-evidence)) and **`snapshots/`** holds what the
+   agent saw at each step.
 4. **`reproduction_*.spec.ts`** — Auto-generated Playwright TypeScript tests, one per bug
    detected. Run with:
    ```bash
    npx playwright test report_<thread_id>/reproduction_*.spec.ts --headed
    ```
+   The header lists the app revision and the session it was recorded with, and a setup
+   check fails with `SETUP_FAILURE` (not a timeout) when the session is gone.
 5. **`screenshots/`** — Image evidence captured on every detected bug.
+
+### Provenance and Evidence
+
+A spec can fail for two very different reasons: the bug reproduced, or the setup is not the
+one that was recorded (expired session, missing data). Each mission therefore records
+`report_<thread_id>/tape_meta.json`: app name and URL, **app revision**, session start,
+a SHA-256 fingerprint of `auth.json` (never its content), the tool version and the optional
+`app.seed` preconditions. The revision comes from `--app-revision`, then `APP_REVISION`,
+then `app.revision` in `config.yaml`; if none is given it is `null`, never guessed.
+
+```mermaid
+flowchart TD
+    R[Run the generated spec] --> S{Which error?}
+    S -- SETUP_FAILURE --> A[Not the bug: the session or the starting data differs from the recording]
+    A --> B[Refresh auth.json with agent-auth, check the preconditions in the header, run again]
+    S -- any other error --> C[The BUG STEPS ran: this is the reproduction]
+    S -- passes --> D[Not reproduced: compare the app revision and the data in the header]
+```
+
+Run the spec once in a clean session before reporting a bug. The redirect check recognises
+login pages by path (`/login`, `/signin`, `/sso`, `/auth`), so an app whose login lives at `/`
+is not detected.
+
+Agents also report **evidence** in the closing `<bugs_found>` block: optional `observed`,
+`observed_at`, `expected` and `confidence` (`confirmed` or `uncertain`). `test_report.md`
+lists each confirmed bug with *Observed / Expected / Where*, and findings the agent could
+not confirm go to a separate **Not determined** section (also in the dashboard); they never
+count as bugs. When the agent passes `expected`, the generated spec asserts it with
+`toContain` instead of only checking that some text exists. Set `AGENT_SNAPSHOT_KEEP=0` to
+stop saving per-step snapshots (default: keep the last 200). Details in
+[ARCHITECTURE_GUIDE.md](ARCHITECTURE_GUIDE.md).
 
 ---
 

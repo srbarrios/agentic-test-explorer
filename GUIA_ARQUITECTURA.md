@@ -661,11 +661,11 @@ El proyecto define varias herramientas especializadas, todas como fabricas (fact
 
 #### Herramientas del navegador (engine.py)
 
-| Herramienta | Archivo:Linea | Descripcion |
+| Herramienta | Archivo | Descripcion |
 |---|---|---|
-| `execute_browser_command` | engine.py:419 | Ejecuta UNA accion JSON en el navegador |
-| `get_dom_snapshot` | engine.py:498 | Lee el DOM actual (solo lectura) |
-| `generate_reproduction_spec` | engine.py:609 | Genera un .spec.ts desde el Action Tape |
+| `execute_browser_command` | engine.py | Ejecuta UNA accion JSON en el navegador |
+| `get_dom_snapshot` | engine.py | Lee el DOM actual (solo lectura) |
+| `generate_reproduction_spec` | engine.py | Genera un .spec.ts desde el Action Tape |
 
 #### Herramientas de captura (custom_tools.py)
 
@@ -686,7 +686,7 @@ El proyecto define varias herramientas especializadas, todas como fabricas (fact
 Esta es la herramienta mas importante del proyecto. Veamos como esta construida:
 
 ```python
-# engine.py:414
+# engine.py
 def get_browser_command_tool(page: Page):
     """Factory: captura la referencia a la pagina de Playwright."""
 
@@ -770,7 +770,7 @@ El proyecto implementa un patron arquitectonico llamado **Record-and-Translate**
 
 ### Acciones Soportadas
 
-El motor solo acepta un conjunto fijo de acciones (engine.py:253):
+El motor solo acepta un conjunto fijo de acciones (engine.py):
 
 ```python
 ALLOWED_ACTIONS = {
@@ -790,7 +790,7 @@ ALLOWED_ACTIONS = {
 
 ### Politica de Selectores Resilientes
 
-Uno de los patrones mas importantes del proyecto es la **validacion de selectores** (engine.py:305):
+Uno de los patrones mas importantes del proyecto es la **validacion de selectores** (engine.py):
 
 ```python
 # Selectores RECHAZADOS (fragiles, dependen de la posicion en el DOM):
@@ -812,7 +812,7 @@ _BRITTLE_SELECTOR_PATTERNS = re.compile(r"""
 
 ### Extraccion del DOM (Snapshot)
 
-Para que el agente "vea" la pagina, el motor extrae un snapshot compacto del DOM usando dos estrategias (engine.py:172):
+Para que el agente "vea" la pagina, el motor extrae un snapshot compacto del DOM usando dos estrategias (engine.py):
 
 #### Estrategia primaria: Arbol de Accesibilidad de Playwright
 
@@ -859,34 +859,113 @@ Cada entrada contiene:
     "result": "clicked [data-test-subj='saveBtn']",
     "error": null,
     "page_url": "https://app.example.com/settings",
-    "page_title": "Settings"
+    "page_title": "Settings",
+    "snapshot_ref": "snapshots/step_0007.txt"
 }
 ```
 
 ### Generacion de .spec.ts
 
-El Action Tape se traduce a un script Playwright ejecutable (engine.py:556):
+El Action Tape se traduce a un script ejecutable de Playwright (`generate_playwright_spec` en `engine.py`). La cabecera lleva la procedencia de la grabacion, primero corre una **comprobacion de preparacion** y los pasos grabados empiezan tras el marcador `BUG STEPS`:
 
 ```typescript
-// Auto-generated reproduction for bug: Error banner on save
-// Generated: 2026-05-17 14:30:00
+/**
+ * Auto-generated reproduction for bug: Cart total ignores discount
+ * Mission thread_id: realrun_cart
+ *
+ * Provenance:
+ *   App revision: v1.4.2
+ *   Session recorded: 2026-11-25T18:22:25+00:00
+ *   auth.json sha256: 44136fa3...caaff8a (modified 2026-11-25T09:00:00+00:00)
+ *   Preconditions (starting data):
+ *     - logged in as standard_user with an empty cart
+ * ...
+ */
 import { test, expect } from '@playwright/test';
 
 test.use({ storageState: 'auth.json' });
 
-test('reproduce: Error banner on save', async ({ page }) => {
-    test.setTimeout(120_000);
-    await page.goto('https://app.example.com/settings');
-    await page.fill('[aria-label="Name"]', 'Test User');
-    await page.click('[data-test-subj="saveBtn"]');
-    // FAILED AT RECORD TIME: check_page_health
-    //   Error: HEALTH: ERROR - 1 error banner(s): Internal Server Error
+test('reproduce: Cart total ignores discount', async ({ page }) => {
+  test.setTimeout(120_000);
+  // --- SETUP CHECK (a failure here is NOT the bug) ---
+  ...                       // lanza SETUP_FAILURE si la URL base no carga
+                            // o aterriza en un login que la grabacion nunca visito
+  // --- BUG STEPS ---
+  await page.goto('https://app.example.com/cart');
+  const _t = await page.locator('[data-test="total"]').first().innerText();
+  expect(_t).toContain('$96.00');   // el valor esperado, cuando el agente lo reporto
 });
 ```
 
-Las acciones que fallaron se incluyen como **comentarios** para documentar el bug.
+Las acciones que fallaron al grabar se incluyen como **comentarios** para documentar el bug. Sin valor `expected`, el paso `extract_text` conserva la comprobacion debil de "hay texto" y el valor observado queda como comentario.
 
-> **Documentacion oficial de Playwright:** [playwright.dev/python](https://playwright.dev/python/)
+### Procedencia de la cinta: `tape_meta.json`
+
+La cinta registra *que paso*; no registraba *donde paso*. Un spec que falla antes de llegar al bug (sesion caducada, falta un dato) se veia igual que el bug. Al empezar cada mision se escribe **una sola vez** `report_<thread_id>/tape_meta.json` (una mision reanudada conserva la cabecera de su primera ejecucion):
+
+```json
+{
+  "type": "header",
+  "thread_id": "realrun_cart",
+  "app_name": "Swag Labs (Sauce Demo)",
+  "app_url": "https://www.saucedemo.com/",
+  "app_revision": "v1.4.2",
+  "started_at": "2026-11-25T18:22:25+00:00",
+  "tool_version": "0.2.0",
+  "auth_state": {"path": "auth.json", "sha256": "44136f...", "modified": "2026-11-25T09:00:00+00:00"},
+  "seed": ["logged in as standard_user with an empty cart"]
+}
+```
+
+* Es un **fichero hermano**, no una primera linea de `action_tape.jsonl`: todos los lectores de la cinta siguen viendo solo acciones y las cintas antiguas no necesitan migracion.
+* `app_revision` sale de `--app-revision`, luego de la variable `APP_REVISION`, luego de `app.revision` en `config.yaml`. Si no se da ninguna es `null`: nunca se adivina.
+* `auth.json` solo se **huella** (SHA-256 y fecha de modificacion); su contenido, cookies incluidas, nunca se guarda.
+* `seed` es `app.seed` de `config.yaml`: precondiciones en texto libre que se copian a la cabecera y al spec. Documenta; no ejecuta nada.
+
+### Leer un spec que falla: SETUP_FAILURE o reproduccion
+
+```mermaid
+flowchart TD
+    R[Ejecutar el spec generado] --> S{Que error sale?}
+    S -- SETUP_FAILURE --> A[No es el bug: la sesion o los datos iniciales difieren de la grabacion]
+    A --> B[Renovar auth.json con agent-auth, revisar las precondiciones de la cabecera y repetir]
+    S -- cualquier otro error --> C[Los BUG STEPS se ejecutaron: esto es la reproduccion]
+    S -- pasa --> D[No se reprodujo: comparar la revision de la app y los datos de la cabecera]
+```
+
+Limites que conviene conocer: la comprobacion de redireccion reconoce paginas de login por su ruta (`/login`, `/signin`, `/sso`, `/auth`), asi que una app cuyo login vive en `/` no se detecta. El habito recomendado es **ejecutar el spec una vez en una sesion limpia antes de reportar un bug**; el framework no lo hace por ti.
+
+### Lo que vio el agente: instantaneas por paso
+
+Tras cada comando el motor muestra al agente una instantanea compacta del DOM / arbol de accesibilidad. Ese texto exacto se guarda en `report_<thread_id>/snapshots/step_NNNN.txt` y la entrada de la cinta solo lleva `"snapshot_ref": "snapshots/step_0003.txt"`, asi `action_tape.jsonl` no crece. Cada instantanea se limita a 12.000 caracteres y solo se conservan las ultimas `AGENT_SNAPSHOT_KEEP` (200 por defecto); `AGENT_SNAPSHOT_KEEP=0` desactiva la funcion. Una referencia a un paso podado apunta a un fichero que ya no existe.
+
+### Evidencia del bug y veredicto "uncertain"
+
+El bloque final `<bugs_found>` admite cuatro campos de evidencia opcionales junto a `title`, `summary`, `location` y `severity` (los bloques antiguos sin ellos siguen siendo validos):
+
+| Campo | Significado |
+|---|---|
+| `observed` | El valor exacto que vio el agente |
+| `observed_at` | Donde se leyo: selector o texto de la region, y URL |
+| `expected` | Lo que deberia haber sido |
+| `confidence` | `confirmed` (por defecto) o `uncertain` |
+
+```json
+<bugs_found>[
+  {"title": "Cart total ignores discount", "summary": "Total shows the undiscounted price after SAVE20",
+   "location": "/cart", "severity": "major", "observed": "$120.00",
+   "observed_at": "[data-test=\"total\"] on /cart", "expected": "$96.00", "confidence": "confirmed"},
+  {"title": "Coupon may reject lowercase codes", "summary": "save20 seemed to do nothing",
+   "location": "/cart", "severity": "minor", "observed": "no change after save20", "confidence": "uncertain"}
+]</bugs_found>
+```
+
+* **`uncertain` es una respuesta honesta**, y el prompt la pide siempre que el agente no pueda distinguir un bug de un comportamiento intencionado. Cualquier valor de `confidence` distinto de `confirmed` se trata como `uncertain`: el parser nunca redondea hacia arriba.
+* **Diseno del estado:** `bugs_found` sigue siendo una lista de cadenas `"title: summary"` con **solo hallazgos confirmados**, asi que los recuentos, la memoria y el panel conservan su significado. Lo que no se pudo confirmar vive en `uncertain_findings` y la evidencia en `bug_evidence`, ambos campos `operator.add` que se asocian a un bug con la misma clave normalizada que deduplica bugs (`orchestration/findings.py`).
+* **Informe:** `test_report.md` lista cada bug confirmado con *Observed / Expected / Where* (o `no observed value recorded`) y una seccion aparte **Not determined**. Estas secciones las genera codigo, no el LLM.
+* **Panel:** la pestana Bugs muestra la misma evidencia y lista aparte los hallazgos inciertos, nunca en el contador de bugs.
+* **Memoria:** la evidencia se guarda en la entrada del catalogo de bugs y enriquece las misiones de regresion ("vi X; esperaba Y"). La huella del bug la ignora, asi que el mismo bug se sigue reconociendo con o sin evidencia. Los hallazgos inciertos no se catalogan.
+* **Spec:** `generate_reproduction_spec` acepta `observed` y `expected` opcionales; ver arriba.
 
 ---
 
@@ -1669,7 +1748,9 @@ def _build_diff_excerpt(diff_text, budget):
     report_{thread_id}/
     |-- traces.log              # Transcript completo (se amplia, con una marca, al reanudar)
     |-- test_report.md          # Reporte ejecutivo generado por LLM
-    |-- action_tape.jsonl       # Log inmutable de acciones
+    |-- tape_meta.json          # Procedencia: revision de la app, sesion, huella de auth.json, seed
+    |-- action_tape.jsonl       # Log inmutable de acciones (las entradas pueden llevar snapshot_ref)
+    |-- snapshots/              # Lo que vio el agente en cada paso (acotado)
     |-- reproduction_*.spec.ts  # Scripts Playwright reproducibles
     |-- screenshots/            # Evidencia visual de bugs
 ```
