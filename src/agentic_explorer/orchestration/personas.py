@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 
 from agentic_explorer.utils import console
 
@@ -138,6 +138,16 @@ def personas_for_tier(tier: str) -> List[Persona]:
 def describe_personas(personas: Sequence[Persona]) -> str:
     """The agent list given to the supervisor: one ``- name: description`` line each."""
     return "\n" + "\n".join(f"- {p.name}: {p.description}" for p in personas) + "\n"
+
+
+def persona_for_thread_id(thread_id: str) -> Optional[Persona]:
+    """The persona a mission's thread id names, by its routing keywords.
+
+    The first persona in registry order wins when several match. ``None`` for ids
+    that follow no persona naming convention (e.g. ``smoke_checkout_01``).
+    """
+    lowered = thread_id.lower()
+    return next((p for p in PERSONAS.values() if any(kw in lowered for kw in p.keywords)), None)
 
 
 def tier_for_thread_id(thread_id: str) -> Tier:

@@ -28,6 +28,7 @@ import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agentic_explorer.config import AppMeta
+from agentic_explorer.memory_health import guarded
 from agentic_explorer.orchestration.personas import ALL_KEYWORDS, tier_for_thread_id
 from agentic_explorer.runtime.retry import is_transient_error
 from agentic_explorer.utils import console
@@ -514,6 +515,23 @@ def _validate_missions(data: Any, pr_number: int) -> dict:
     return data
 
 
+async def _bug_history_context(store, app: AppMeta) -> str:
+    """The most-seen known bugs of the app, formatted for the scenario-generation prompt."""
+    from agentic_explorer.memory import app_url_hash
+
+    bugs = await store.asearch(("episodes", app_url_hash(app.url), "bugs"), limit=15)
+    if not bugs:
+        return ""
+    bug_lines = []
+    for b in sorted(bugs, key=lambda x: x.value.get("seen_count", 0), reverse=True):
+        v = b.value
+        bug_lines.append(
+            f"- [{v.get('page', '?')}] {v.get('summary', '?')[:200]} "
+            f"(seen {v.get('seen_count', 1)}x, status: {v.get('status', 'open')})"
+        )
+    return "These areas have been historically buggy:\n" + "\n".join(bug_lines[:10])
+
+
 async def generate_missions_from_pr(pr_data: PRData, app: AppMeta, store=None) -> dict:
     """Use an LLM to generate targeted test missions from PR data.
 
@@ -527,21 +545,11 @@ async def generate_missions_from_pr(pr_data: PRData, app: AppMeta, store=None) -
 
     bug_context = ""
     if store and app.url:
-        try:
-            from agentic_explorer.memory import app_url_hash
-            url_hash = app_url_hash(app.url)
-            bugs = await store.asearch(("episodes", url_hash, "bugs"), limit=15)
-            if bugs:
-                bug_lines = []
-                for b in sorted(bugs, key=lambda x: x.value.get("seen_count", 0), reverse=True):
-                    v = b.value
-                    bug_lines.append(
-                        f"- [{v.get('page', '?')}] {v.get('summary', '?')[:200]} "
-                        f"(seen {v.get('seen_count', 1)}x, status: {v.get('status', 'open')})"
-                    )
-                bug_context = "These areas have been historically buggy:\n" + "\n".join(bug_lines[:10])
-        except Exception:
-            pass
+        # Best effort: without the history the missions are still generated, but the
+        # failure is logged and counted instead of silently dropped.
+        bug_context = await guarded(
+            "PR bug history read", lambda: _bug_history_context(store, app), default="",
+        )
 
     system_msg = SystemMessage(content=_SYSTEM_PROMPT)
     human_msg = HumanMessage(content=_build_human_message(pr_data, app, bug_context=bug_context))

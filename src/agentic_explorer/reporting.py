@@ -107,13 +107,21 @@ def write_report(thread_id: str, text: str) -> str:
     return path
 
 
-def append_action_tape_summary(thread_id: str, *, tape_len: int, bugs_count: int) -> None:
+def append_action_tape_summary(
+    thread_id: str, *, tape_len: int, bugs_count: int, memory_errors: int = 0,
+) -> None:
     path = os.path.join(report_dir(thread_id), "test_report.md")
+    memory_line = (
+        f"- **Memory errors:** {memory_errors} — learning from this run may be incomplete "
+        "(the console warned about each kind; configure logging for `agentic_explorer.memory` for details).\n"
+        if memory_errors else ""
+    )
     with open(path, "a", encoding="utf-8") as report_file:
         report_file.write(
             f"\n## Action Tape\n\n"
             f"- **Recorded steps:** {tape_len}\n"
             f"- **Bugs captured:** {bugs_count}\n"
+            f"{memory_line}"
             f"- **Tape log:** `action_tape.jsonl`\n"
             f"- **Reproductions:** any `reproduction_*.spec.ts` in this folder can be run with `npx playwright test`.\n"
         )

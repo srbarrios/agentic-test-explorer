@@ -189,3 +189,16 @@ def test_write_report_and_append_tape_summary(tmp_path, monkeypatch):
     assert "- **Bugs captured:** 3" in content
     assert "`action_tape.jsonl`" in content
     assert "reproduction_*.spec.ts" in content
+    assert "Memory errors" not in content  # nothing failed, so nothing to say
+
+
+def test_memory_errors_are_reported_when_there_were_any(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "report_m1").mkdir()
+    write_report("m1", "## Result")
+
+    append_action_tape_summary("m1", tape_len=12, bugs_count=3, memory_errors=2)
+
+    content = (tmp_path / "report_m1" / "test_report.md").read_text(encoding="utf-8")
+    assert "- **Memory errors:** 2" in content
+    assert "learning from this run may be incomplete" in content

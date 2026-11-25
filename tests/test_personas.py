@@ -14,6 +14,7 @@ from agentic_explorer.orchestration.graph_base import BROWSER_AGENT_RULES
 from agentic_explorer.orchestration.personas import (
     ADVANCED_KEYWORDS,
     PERSONAS,
+    persona_for_thread_id,
     personas_for_tier,
     resolve_tier,
     tier_for_thread_id,
@@ -113,6 +114,27 @@ def test_swarm_diagram_labels_come_from_the_registry():
 ])
 def test_tier_for_thread_id_by_keyword(thread_id, tier):
     assert tier_for_thread_id(thread_id) == tier
+
+
+# ---------------------------------------------------------------- persona_for_thread_id
+
+@pytest.mark.parametrize("thread_id, expected", [
+    ("test_new_user_01", "new_user_agent"),
+    ("pr_7_power_user_02", "power_user_agent"),
+    ("test_adversarial_user_01", "adversarial_user_agent"),  # the id shipped in missions/
+    ("test_A11Y_keyboard", "accessibility_user_agent"),  # case-insensitive
+    ("test_data-heavy_02", "data_heavy_user_agent"),
+    ("pr_7_impatient_01", "impatient_user_agent"),
+    ("test_returning_01", "returning_user_agent"),
+    ("explorer_chaos_agent_01", "explorer_agent"),
+    ("test_autonomous_run", "explorer_agent"),
+    ("smoke_checkout_01", None),  # follows no persona naming convention
+    ("test_new_user_explorer_notes", "new_user_agent"),  # ambiguous: the first persona in the registry wins
+])
+def test_persona_for_thread_id(thread_id, expected):
+    persona = persona_for_thread_id(thread_id)
+
+    assert (persona.name if persona else None) == expected
 
 
 # ---------------------------------------------------------------- resolve_tier

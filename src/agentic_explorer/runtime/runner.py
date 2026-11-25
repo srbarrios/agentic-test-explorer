@@ -12,6 +12,7 @@ from langgraph.errors import GraphDrained
 from langgraph.runtime import RunControl
 
 from agentic_explorer.memory import app_url_hash, write_episode_memory
+from agentic_explorer.memory_health import guarded, memory_health
 from agentic_explorer.orchestration.graph_base import dedupe_bugs
 from agentic_explorer.reporting import (
     append_action_tape_summary,
@@ -37,6 +38,7 @@ class MissionResult:
     bugs: List[str]
     paths: List[str]
     tape_len: int
+    memory_errors: int = 0  # memory operations that failed during this mission
 
 
 def _initial_state(prompt: str) -> Dict[str, Any]:
@@ -158,6 +160,7 @@ async def run_mission(
     """
     thread_id = str(mission["thread_id"])
     prompt = mission["prompt"]
+    memory_mark = memory_health.count  # failures before this point belong to earlier missions
 
     console.mission_start(thread_id, mission_type)
 
@@ -213,13 +216,15 @@ async def run_mission(
     tape = get_action_tape(thread_id)
     explored_paths = final_state.values.get("explored_paths", [])
 
-    # Write episodic memory (session summary + bug catalog)
-    try:
-        await write_episode_memory(
-            store, app_url_hash(app_url), thread_id, prompt, tape, bugs_found, explored_paths,
+    # Write episodic memory (session summary + bug catalog). A broken store must not
+    # abort the mission, but the failure is logged and counted, not silently dropped.
+    if store is not None:
+        await guarded(
+            "episode memory write",
+            lambda: write_episode_memory(
+                store, app_url_hash(app_url), thread_id, prompt, tape, bugs_found, explored_paths,
+            ),
         )
-    except Exception:
-        pass
 
     console.mission_done(thread_id, len(tape), len(bugs_found))
 
@@ -227,8 +232,15 @@ async def run_mission(
         state_emitter.end_mission(thread_id)
         state_emitter.emit()
 
-    append_action_tape_summary(thread_id, tape_len=len(tape), bugs_count=len(bugs_found))
-    return MissionResult(thread_id=thread_id, bugs=bugs_found, paths=explored_paths, tape_len=len(tape))
+    # Includes failures inside graph nodes (semantic writes, context reads) during this mission.
+    memory_errors = memory_health.count_since(memory_mark)
+    append_action_tape_summary(
+        thread_id, tape_len=len(tape), bugs_count=len(bugs_found), memory_errors=memory_errors,
+    )
+    return MissionResult(
+        thread_id=thread_id, bugs=bugs_found, paths=explored_paths, tape_len=len(tape),
+        memory_errors=memory_errors,
+    )
 
 
 def _raise_if_drained(control: RunControl) -> None:

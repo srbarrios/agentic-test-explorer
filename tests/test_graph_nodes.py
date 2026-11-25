@@ -10,12 +10,14 @@ from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, Tool
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 
+from agentic_explorer.memory_health import memory_health
 from agentic_explorer.orchestration.graph_base import (
     AgentState,
     make_agent_node,
     make_summarizer_node,
     make_supervisor_node,
 )
+from agentic_explorer.tools.browser.engine import get_action_tape
 
 AGENTS = ("new_user_agent", "power_user_agent")
 
@@ -190,6 +192,69 @@ async def test_agent_node_with_no_new_output_returns_nothing():
 
     assert out["messages"] == []
     assert out["bugs_found"] == []
+
+
+class _BrokenStore:
+    """A memory store that is down: every operation fails."""
+
+    async def aget(self, *args, **kwargs):
+        raise RuntimeError("store is down")
+
+    aput = asearch = aget
+
+
+class _TapeAgent(_EchoAgent):
+    """Also records a browser action, like the real tools do while an agent works."""
+
+    async def astream(self, state, config=None):
+        # The shape of a real tape entry: page_url/page_title and a selector make the node write memory.
+        get_action_tape("default").append({
+            "action": "click", "ok": True, "page_url": "https://app.test/cart",
+            "page_title": "Cart", "params": {"selector": "button:has-text('Pay')"},
+        })
+        async for snapshot in super().astream(state, config):
+            yield snapshot
+
+
+async def test_agent_node_survives_a_failing_store_and_counts_the_failure():
+    agent = _TapeAgent(AIMessage(content="ok", id="a1"))
+    node = make_agent_node(agent, name="agent", quiet=True, app_url_hash="h")
+    tape = get_action_tape("default")
+    tape.clear()
+    try:
+        out = await node(_state(messages=[HumanMessage(content="mission", id="h0")]), store=_BrokenStore())
+    finally:
+        tape.clear()
+
+    assert [m.content for m in out["messages"]] == ["ok"]  # the mission carries on
+    assert memory_health.count == 1  # and the failure is no longer invisible
+    assert memory_health.errors[0].operation == "semantic memory write"
+
+
+async def test_agent_node_without_a_store_records_no_failure():
+    agent = _TapeAgent(AIMessage(content="ok", id="a1"))
+    tape = get_action_tape("default")
+    tape.clear()
+    try:
+        await make_agent_node(agent, name="agent", quiet=True, app_url_hash="h")(
+            _state(messages=[HumanMessage(content="mission", id="h0")]),
+        )
+    finally:
+        tape.clear()
+
+    assert memory_health.count == 0
+
+
+async def test_supervisor_still_routes_when_the_memory_store_fails():
+    node = make_supervisor_node(
+        _FakeRoutingLLM("power_user_agent"), AGENTS, "https://app.test", max_steps=30, app_url_hash="h",
+    )
+
+    out = await node(_state(), store=_BrokenStore())
+
+    assert out["next_agent"] == "power_user_agent"
+    assert memory_health.count == 1
+    assert memory_health.errors[0].operation == "memory context read"
 
 
 async def test_bug_counter_counts_each_bug_once_across_turns():

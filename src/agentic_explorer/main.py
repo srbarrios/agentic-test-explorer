@@ -21,6 +21,7 @@ from playwright.async_api import async_playwright  # noqa: E402
 from agentic_explorer.cli import parse_args  # noqa: E402
 from agentic_explorer.config import AppConfig, load_app_config, load_environment  # noqa: E402
 from agentic_explorer.memory_admin import DEFAULT_DB  # noqa: E402
+from agentic_explorer.memory_health import guarded  # noqa: E402
 from agentic_explorer.orchestration.graph import build_graph  # noqa: E402
 from agentic_explorer.orchestration.personas import resolve_tier  # noqa: E402
 from agentic_explorer.runtime.drain import install_drain_handlers  # noqa: E402
@@ -163,12 +164,13 @@ async def run_missions():
         finally:
             uninstall_drain_handlers()
 
-        # Post-batch: update procedural memory via LLM reflection
-        try:
-            from agentic_explorer.memory import app_url_hash, update_procedural_memory
-            await update_procedural_memory(memory_store, app_url_hash(cfg.app.url), make_llm(temperature=0))
-        except Exception:
-            pass
+        # Post-batch: update procedural memory via LLM reflection. Best effort, but a
+        # failure is logged and counted instead of vanishing.
+        from agentic_explorer.memory import app_url_hash, update_procedural_memory
+        await guarded(
+            "procedural reflection",
+            lambda: update_procedural_memory(memory_store, app_url_hash(cfg.app.url), make_llm(temperature=0)),
+        )
 
         console.final_summary(len(missions))
 

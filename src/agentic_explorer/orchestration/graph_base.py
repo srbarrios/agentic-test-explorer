@@ -17,6 +17,7 @@ from typing import Annotated, Any, Dict, List, Sequence, TypedDict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langgraph.graph.message import add_messages
 
+from agentic_explorer.memory_health import guarded
 from agentic_explorer.tools.browser.engine import get_action_tape
 from agentic_explorer.utils import console
 from agentic_explorer.utils.llm import make_llm  # noqa: F401  re-exported for back-compat
@@ -417,12 +418,10 @@ def make_agent_node(agent, *, name: str = "agent", quiet: bool = False, app_url_
 
         if store and app_url_hash and new_tape:
             from agentic_explorer.memory import write_semantic_memories_from_tape
-            try:
-                await write_semantic_memories_from_tape(
-                    store, app_url_hash, new_tape, agent_name=name,
-                )
-            except Exception:
-                pass
+            await guarded(
+                "semantic memory write",
+                lambda: write_semantic_memories_from_tape(store, app_url_hash, new_tape, agent_name=name),
+            )
 
         return {
             "messages": new_messages,
@@ -482,10 +481,11 @@ def make_supervisor_node(llm, agent_names: tuple, app_url: str, max_steps: int, 
         memory_context = ""
         if store and app_url_hash:
             from agentic_explorer.memory import format_memory_context
-            try:
-                memory_context = await format_memory_context(store, app_url_hash)
-            except Exception:
-                pass
+            memory_context = await guarded(
+                "memory context read",
+                lambda: format_memory_context(store, app_url_hash),
+                default="",
+            )
 
         # Build context-rich routing prompt
         bugs_ctx = f" {len(state.get('bugs_found', []))} bug(s) found so far." if state.get("bugs_found") else ""

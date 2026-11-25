@@ -19,6 +19,7 @@ from langgraph.runtime import RunControl
 from langgraph.store.memory import InMemoryStore
 
 from agentic_explorer.memory import app_url_hash
+from agentic_explorer.memory_health import memory_health
 from agentic_explorer.orchestration.graph_base import AgentState, compile_swarm, make_agent_node
 from agentic_explorer.runtime import runner
 from agentic_explorer.runtime.runner import MissionResult, run_mission, run_missions_batch
@@ -453,17 +454,43 @@ async def test_episode_memory_is_written_to_the_store():
     assert bugs[0].value["sessions"] == ["test_new_user_01"]
 
 
-async def test_a_failing_store_does_not_abort_the_mission():
-    class BrokenStore:
-        async def aput(self, *args, **kwargs):
-            raise RuntimeError("disk full")
+class _BrokenStore:
+    async def aput(self, *args, **kwargs):
+        raise RuntimeError("disk full")
 
-        async def aget(self, *args, **kwargs):
-            raise RuntimeError("disk full")
+    aget = aput
 
-    result, _ = await _run(FakeGraph([[STEP]], final_values=FINAL), store=BrokenStore())
 
-    assert result.thread_id == "test_new_user_01"
+async def test_a_failing_store_does_not_abort_the_mission_and_is_reported(in_tmp_cwd):
+    result, _ = await _run(FakeGraph([[STEP]], final_values=FINAL), store=_BrokenStore())
+
+    assert result.thread_id == "test_new_user_01"  # the mission carries on
+    assert result.memory_errors == 1  # but the lost episode is no longer invisible
+    report = (in_tmp_cwd / "report_test_new_user_01" / "test_report.md").read_text(encoding="utf-8")
+    assert "- **Memory errors:** 1" in report
+    assert "learning from this run may be incomplete" in report
+
+
+async def test_a_healthy_store_reports_no_memory_errors(in_tmp_cwd):
+    result, _ = await _run(FakeGraph([[STEP]], final_values=FINAL), store=InMemoryStore())
+
+    assert result.memory_errors == 0
+    report = (in_tmp_cwd / "report_test_new_user_01" / "test_report.md").read_text(encoding="utf-8")
+    assert "Memory errors" not in report
+
+
+async def test_running_without_a_store_writes_no_episode_and_counts_no_failure():
+    result, _ = await _run(FakeGraph([[STEP]], final_values=FINAL), store=None)
+
+    assert result.memory_errors == 0
+
+
+async def test_failures_from_before_the_mission_are_not_attributed_to_it():
+    memory_health.record("an earlier mission's write", RuntimeError("old"))
+
+    result, _ = await _run(FakeGraph([[STEP]], final_values=FINAL), store=InMemoryStore())
+
+    assert result.memory_errors == 0
 
 
 # ---------------------------------------------------------------- visual mode
