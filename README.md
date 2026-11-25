@@ -316,9 +316,11 @@ ANTHROPIC_API_KEY="your_anthropic_api_key_here"
 # produced by: gemini auth login
 
 # --- Application under test ---
-APP_URL="https://your-app.example.com"
-APP_USERNAME="your_user"
-APP_PASSWORD="your_password"
+# The defaults target the public demo shop https://www.saucedemo.com/ (its login page
+# publishes these credentials). Replace all three with your own app's values.
+APP_URL="https://www.saucedemo.com/"
+APP_USERNAME="standard_user"
+APP_PASSWORD="secret_sauce"
 
 APP_CONFIG="./config.yaml"
 MCP_SERVERS_CONFIG="./mcp_servers.json"
@@ -353,17 +355,17 @@ Copy `config.yaml.example` → `config.yaml` and customize for your application:
 
 ```yaml
 app:
-  name: "My Web Application"
+  name: "Swag Labs (Sauce Demo)"
   url: ${APP_URL}
-  description: "Brief description used to give agent prompts domain context."
+  description: "Demo online shop: login, product inventory, cart and checkout."
 
 auth:
   method: form
   selectors:
-    username: 'input[name="username"]'
-    password: 'input[name="password"]'
-    submit:   'button[type="submit"]'
-  post_login_check: 'a[href="/home"]'   # selector that confirms login worked
+    username: '[data-test="username"]'
+    password: '[data-test="password"]'
+    submit:   '[data-test="login-button"]'
+  post_login_check: '[data-test="inventory-container"]'   # selector that confirms login worked
 
 paths:
   mcp_servers: ./mcp_servers.json
