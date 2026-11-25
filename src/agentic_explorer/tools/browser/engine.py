@@ -529,7 +529,15 @@ def _ts_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
 
 
-def _tape_entry_to_ts(entry: Dict[str, Any]) -> Optional[str]:
+def _tape_entry_to_ts(
+    entry: Dict[str, Any], *, expected: Optional[str] = None, observed: Optional[str] = None,
+) -> Optional[str]:
+    """TypeScript for one tape entry.
+
+    ``expected`` / ``observed`` only matter for ``extract_text``: with an expected value the
+    step asserts it (``toContain``); without one it keeps the weak "text exists" check and
+    leaves the observed value as a comment.
+    """
     prefix = ""
     if not entry.get("ok"):
         err = str(entry.get("error", "Unknown Error"))
@@ -560,9 +568,18 @@ def _tape_entry_to_ts(entry: Dict[str, Any]) -> Optional[str]:
             )
         return prefix + f"  await page.evaluate(() => window.scrollBy(0, {int(p.get('y', 400))}));"
     if a == "extract_text":
-        return prefix + (
+        notes = ""
+        if observed:
+            notes += f"  // observed at record time: {_comment_safe(observed)}\n"
+            if not expected:
+                notes += "  // no expected value recorded, so only the weak 'text exists' check below\n"
+        assertion = (
+            f"  expect(_t).toContain('{_ts_escape(expected)}');" if expected
+            else "  expect(_t.length).toBeGreaterThan(0);"
+        )
+        return prefix + notes + (
             f"  const _t = await page.locator('{_ts_escape(p['selector'])}').first().innerText();\n"
-            f"  expect(_t.length).toBeGreaterThan(0);"
+            + assertion
         )
     if a == "snapshot":
         return prefix + "  // snapshot (no-op in replay)"
@@ -640,9 +657,15 @@ def generate_playwright_spec(
     bug_summary: str,
     app_url: Optional[str] = None,
     storage_state_path: str = "auth.json",
+    *,
+    observed: Optional[str] = None,
+    expected: Optional[str] = None,
 ) -> str:
     """Translate the recorded Action Tape into a runnable Playwright spec file.
-    Returns the absolute path of the generated .spec.ts file."""
+
+    ``observed`` / ``expected`` (what the agent saw and what it should have been) turn the
+    last successful ``extract_text`` step into a real assertion. Returns the absolute path
+    of the generated .spec.ts file."""
     tape = get_action_tape(thread_id)
     bug_summary_clean = bug_summary.replace("\n", " ").replace("*/", "* /")
     safe = re.sub(r"[^a-zA-Z0-9]", "_", bug_summary_clean)[:40].strip("_") or "bug"
@@ -650,11 +673,24 @@ def generate_playwright_spec(
     os.makedirs(out_dir, exist_ok=True)
     spec_path = os.path.join(out_dir, f"reproduction_{safe}_{int(time.time())}.spec.ts")
 
+    # The value the bug is about was read by the last successful extract_text.
+    target = max(
+        (i for i, e in enumerate(tape) if e.get("action") == "extract_text" and e.get("ok")), default=None,
+    )
     steps: List[str] = []
-    for entry in tape:
-        line = _tape_entry_to_ts(entry)
+    for i, entry in enumerate(tape):
+        line = (
+            _tape_entry_to_ts(entry, expected=expected, observed=observed) if i == target
+            else _tape_entry_to_ts(entry)
+        )
         if line:
             steps.append(line)
+    if target is None and (expected or observed):
+        # Nothing to assert against: keep the evidence as comments instead of dropping it.
+        if expected:
+            steps.append(f"  // expected: {_comment_safe(expected)}")
+        if observed:
+            steps.append(f"  // observed at record time: {_comment_safe(observed)}")
 
     meta = load_provenance(thread_id) or {}
     header = [
@@ -696,18 +732,26 @@ def generate_playwright_spec(
 # ---------------------------------------------------------
 def get_code_generator_tool(app_url: Optional[str] = None):
     @tool
-    async def generate_reproduction_spec(bug_summary: str, config: RunnableConfig) -> str:
+    async def generate_reproduction_spec(
+        bug_summary: str, config: RunnableConfig, expected: str = "", observed: str = "",
+    ) -> str:
         """Translate the immutable Action Tape into a 100%-reproducible
         Playwright .spec.ts script a developer can run locally.
 
         Call this *immediately after* `capture_bug_screenshot` so every bug has
-        both a visual evidence and an executable repro script."""
+        both a visual evidence and an executable repro script. When the bug is a
+        wrong value you read with extract_text, also pass `observed` (the exact value
+        you saw) and `expected` (what it should be): the spec then asserts the real
+        value instead of only checking that some text exists. Omit them if unsure."""
         thread_id = config.get("configurable", {}).get("thread_id", "default")
         tape = get_action_tape(thread_id)
         if not tape:
             return "No Action Tape recorded yet — nothing to translate."
         try:
-            path = generate_playwright_spec(thread_id, bug_summary, app_url=app_url)
+            path = generate_playwright_spec(
+                thread_id, bug_summary, app_url=app_url,
+                expected=expected.strip() or None, observed=observed.strip() or None,
+            )
             return f"Reproduction spec generated at {path} ({len(tape)} recorded actions)."
         except Exception as exc:
             return f"Failed to generate reproduction spec: {exc}"
