@@ -88,6 +88,9 @@ async def run_missions():
 
         start_dashboard(
             app_url=cfg.app.url, provider=get_active_provider(), model_name=get_model_name(probe_llm),
+            # With --headed the dashboard gets its own window next to the mission browser (ui/layout.py);
+            # otherwise it opens as a tab of the default browser.
+            open_browser=not cli.headed,
         )
 
     if not cfg.app.url:
@@ -144,6 +147,13 @@ async def run_missions():
 
         active_page = await context.new_page()
 
+        # --headed --visual: mission browser on the left half of the screen, dashboard on the right.
+        dashboard_browser = None
+        if cli.visual and cli.headed:
+            from agentic_explorer.ui.layout import open_dashboard_window
+
+            dashboard_browser = await open_dashboard_window(playwright_instance, active_page)
+
         # base_tools: MCP docs + Agent Skills only.
         # Raw PlayWrightBrowserToolkit tools are intentionally excluded — agents emit
         # JSON intents via execute_browser_command, not Playwright calls directly.
@@ -198,6 +208,8 @@ async def run_missions():
             # Give dashboard time to show completion before we exit
             await asyncio.sleep(2)
 
+        if dashboard_browser is not None:
+            await dashboard_browser.close()
         await browser.close()
 
 
