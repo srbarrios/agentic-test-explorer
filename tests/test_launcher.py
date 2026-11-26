@@ -5,6 +5,7 @@ dashboard starts.
 """
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -61,9 +62,10 @@ def test_start_launches_streamlit_headless_and_returns_the_process(env):
 
     assert proc is env["proc"]
     cmd, kwargs = env["popen"][0]
-    assert cmd[:2] == ["streamlit", "run"]
-    assert Path(cmd[2]).name == "dashboard.py" and Path(cmd[2]).parent.name == "ui"
-    assert cmd[3:] == ["--server.headless", "true", "--browser.gatherUsageStats", "false"]
+    # Run through the current interpreter, never a "streamlit" found on PATH (see the test below).
+    assert cmd[:4] == [sys.executable, "-m", "streamlit", "run"]
+    assert Path(cmd[4]).name == "dashboard.py" and Path(cmd[4]).parent.name == "ui"
+    assert cmd[5:] == ["--server.headless", "true", "--browser.gatherUsageStats", "false"]
     assert kwargs == {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
 
 
@@ -118,3 +120,11 @@ def test_stop_ignores_an_already_finished_dashboard():
 
 def test_stop_accepts_none():
     stop_dashboard(None)
+
+
+def test_the_command_does_not_depend_on_the_path(env, monkeypatch):
+    # With the venv not activated "streamlit" may be missing or be some other file on PATH.
+    monkeypatch.setenv("PATH", "/nonexistent")
+    start_dashboard(app_url="u", provider="p", model_name="m")
+    cmd, _ = env["popen"][0]
+    assert Path(cmd[0]).is_absolute() and cmd[1:3] == ["-m", "streamlit"]

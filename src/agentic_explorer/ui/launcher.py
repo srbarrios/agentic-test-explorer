@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import os
 import subprocess
+import sys
 import time
 import webbrowser
 from typing import Optional
@@ -26,9 +27,12 @@ def start_dashboard(*, app_url: str, provider: str, model_name: str) -> subproce
     state_emitter.enable()
     state_emitter.update(app_url=app_url, provider=provider, model_name=model_name)
 
+    # The interpreter running this process, not whatever "streamlit" the PATH finds first: with
+    # the venv not activated that is missing or the wrong file (PermissionError), and the
+    # dashboard must run with the same environment as the swarm.
     proc = subprocess.Popen(
         [
-            "streamlit", "run", _DASHBOARD_PATH,
+            sys.executable, "-m", "streamlit", "run", _DASHBOARD_PATH,
             "--server.headless", "true",
             "--browser.gatherUsageStats", "false",
         ],
