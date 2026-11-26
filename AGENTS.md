@@ -223,6 +223,9 @@ The framework is configured through three user-supplied files (templates ship as
   overhead. The main process writes state to `.agent_state.json` (atomic via `os.replace`)
   and async screenshots to `.latest_vision.jpg` (fire-and-forget). The dashboard polls
   these files every ~1s. Enabled via `--visual` flag; requires `pip install -e ".[visual]"`.
+  With `--headed`, `ui/layout.py` opens the dashboard in its own Chromium window and tiles it next to
+  the mission browser (left half / right half, via CDP `Browser.setWindowBounds`, best effort); the
+  launcher then does not open the default browser (`start_dashboard(open_browser=False)`).
   Implementation: `state_emitter.py` (non-blocking state bridge), `swarm_diagram.py`
   (Mermaid generator), `dashboard.py` (Streamlit app).
 

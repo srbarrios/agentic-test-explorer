@@ -493,7 +493,9 @@ agent-explorer --pr-url https://github.com/org/repo/pull/123 --execute --visual
 agent-explorer --regression --headed --visual
 ```
 
-The Streamlit dashboard will automatically open in your default browser at `http://localhost:8501`. If it doesn't open automatically, navigate to that URL manually.
+Without `--headed`, the Streamlit dashboard opens in your default browser at `http://localhost:8501` (if it doesn't, navigate to that URL manually).
+
+With `--headed --visual` the dashboard gets its own Chromium window and the two windows are tiled: the mission's browser on the left half of the screen, the dashboard (live browser view, swarm graph, thought stream, action tape, bugs) on the right. This does not depend on your default browser. If the windows cannot be arranged (the browser refuses the window API) they stay where they are and a warning says so. Note that the dashboard already shows the browser live, so `--headed` is optional with `--visual`.
 
 ### Dashboard Features
 

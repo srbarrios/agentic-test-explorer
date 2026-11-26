@@ -17,10 +17,13 @@ DASHBOARD_URL = "http://localhost:8501"
 _DASHBOARD_PATH = os.path.join(os.path.dirname(__file__), "dashboard.py")
 
 
-def start_dashboard(*, app_url: str, provider: str, model_name: str) -> subprocess.Popen:
-    """Reset Visual Mode state, launch Streamlit and open it in the browser.
+def start_dashboard(
+    *, app_url: str, provider: str, model_name: str, open_browser: bool = True,
+) -> subprocess.Popen:
+    """Reset Visual Mode state, launch Streamlit and (by default) open it in the default browser.
 
-    The process is terminated when the interpreter exits.
+    With ``open_browser=False`` the caller shows the dashboard itself (``ui/layout.py`` does,
+    next to the mission's browser). The process is terminated when the interpreter exits.
     """
     # Clear any stale state from previous runs.
     state_emitter.cleanup()
@@ -47,7 +50,8 @@ def start_dashboard(*, app_url: str, provider: str, model_name: str) -> subproce
 
     # Give Streamlit a moment to start, then open the browser.
     time.sleep(2)
-    webbrowser.open(DASHBOARD_URL)
+    if open_browser:
+        webbrowser.open(DASHBOARD_URL)
     return proc
 
 
