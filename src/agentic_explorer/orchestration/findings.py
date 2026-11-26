@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 CONFIRMED = "confirmed"
 UNCERTAIN = "uncertain"
@@ -181,6 +181,29 @@ def extract_findings(text: str) -> ExtractedFindings:
 
     found.evidence = [rec for entry in found.confirmed + found.uncertain if (rec := kept.get(entry))]
     return found
+
+
+def _squash(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def same_observation(observed: Any, expected: Any, records: Sequence[Mapping[str, str]]) -> bool:
+    """True when some evidence record describes the very same observation.
+
+    Titles are free text and one defect often gets two (one for the screenshot, another for the
+    closing block), so the observed value is the reliable key: it must be non-empty and equal
+    (ignoring whitespace) to a record's, and the expected values must agree when both exist.
+    """
+    seen = _squash(observed)
+    if not seen:
+        return False
+    for rec in records:
+        if _squash(rec.get("observed")) != seen:
+            continue
+        wanted, other = _squash(expected), _squash(rec.get("expected"))
+        if not wanted or not other or wanted == other:
+            return True
+    return False
 
 
 def find_evidence(bug_text: str, records: Sequence[Dict[str, str]]) -> Optional[Dict[str, str]]:

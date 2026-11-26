@@ -24,6 +24,7 @@ from agentic_explorer.orchestration.findings import (
     extract_findings,
     is_dup_key,
     normalize_bug_key,
+    same_observation,
     split_findings,
 )
 from agentic_explorer.tools.browser.engine import get_action_tape
@@ -152,17 +153,28 @@ def _extract_turn_findings(messages: Sequence[BaseMessage]) -> ExtractedFindings
     ``bug_summary`` (read from AIMessage.tool_calls, since the ToolMessage result
     "Evidence captured!..." drops that argument). An explicit ``uncertain`` verdict
     in a closing block wins over the screenshot that preceded it.
+
+    The agent usually also calls ``generate_reproduction_spec`` with the same ``bug_summary``
+    plus ``observed`` / ``expected``. That is evidence for the screenshot bug, and when the
+    closing block reports the very same observation under another title it is the same defect:
+    the screenshot entry is dropped instead of counting it twice.
     """
     text_found = ExtractedFindings()
     screenshots: List[str] = []
+    spec_evidence: Dict[str, Dict[str, str]] = {}  # bug key -> observed / expected given to the spec tool
     for msg in messages:
         if isinstance(msg, AIMessage):
             for tc in getattr(msg, "tool_calls", None) or []:
-                if tc.get("name") == "capture_bug_screenshot":
-                    args = tc.get("args") or {}
-                    summary = args.get("bug_summary") if isinstance(args, dict) else None
-                    if summary:
-                        screenshots.append(str(summary))
+                args = tc.get("args")
+                if not isinstance(args, dict):
+                    continue
+                summary = args.get("bug_summary")
+                if tc.get("name") == "capture_bug_screenshot" and summary:
+                    screenshots.append(str(summary))
+                elif tc.get("name") == "generate_reproduction_spec" and summary:
+                    given = {k: str(args[k]).strip() for k in ("observed", "expected") if args.get(k)}
+                    if given:
+                        spec_evidence[normalize_bug_key(_clean_screenshot(str(summary)))] = given
             part = extract_findings(message_text(msg))
             text_found.confirmed += part.confirmed
             text_found.uncertain += part.uncertain
@@ -170,9 +182,22 @@ def _extract_turn_findings(messages: Sequence[BaseMessage]) -> ExtractedFindings
 
     uncertain_keys = [normalize_bug_key(u) for u in text_found.uncertain]
     screenshots = [s for s in screenshots if not is_dup_key(normalize_bug_key(_clean_screenshot(s)), uncertain_keys)]
-    confirmed, uncertain = split_findings(
-        [_clean_screenshot(s) for s in screenshots] + text_found.confirmed, text_found.uncertain)
-    return ExtractedFindings(confirmed=confirmed, uncertain=uncertain, evidence=text_found.evidence)
+
+    kept: List[str] = []
+    screenshot_evidence: List[Dict[str, str]] = []
+    for shot in screenshots:
+        summary = _clean_screenshot(shot)
+        given = spec_evidence.get(normalize_bug_key(summary))
+        if given and same_observation(given.get("observed"), given.get("expected"), text_found.evidence):
+            continue  # the closing block reports this same observation
+        kept.append(summary)
+        if given:
+            screenshot_evidence.append({"bug": summary, "confidence": "confirmed", **given})
+
+    confirmed, uncertain = split_findings(kept + text_found.confirmed, text_found.uncertain)
+    return ExtractedFindings(
+        confirmed=confirmed, uncertain=uncertain, evidence=text_found.evidence + screenshot_evidence,
+    )
 
 
 def _clean_screenshot(summary: str) -> str:

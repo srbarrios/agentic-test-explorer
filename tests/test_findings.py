@@ -206,3 +206,91 @@ async def test_agent_node_emits_confirmed_uncertain_and_evidence_separately():
     assert out["bugs_found"] == ["Total ignores discount: Cart total shows the undiscounted price"]
     assert out["uncertain_findings"] == ["Coupon field may reject lowercase: SAVE20 worked but save20 did not appear to"]
     assert {r["confidence"] for r in out["bug_evidence"]} == {"confirmed", "uncertain"}
+
+
+# --- one defect, reported twice in the same turn ------------------------------------------
+# A real Haiku run: capture_bug_screenshot and generate_reproduction_spec named the bug one way
+# and the closing block another, so title matching kept both (bugs=2 for one defect).
+
+SHOT_TITLE = "Login error message mismatch when submitting empty form"
+OBSERVED = "Epic sadface: Username is required"
+EXPECTED = "Please enter your credentials"
+
+
+def _shot_and_spec(summary=SHOT_TITLE, observed=OBSERVED, expected=EXPECTED):
+    spec_args = {"bug_summary": summary}
+    if observed is not None:
+        spec_args["observed"] = observed
+    if expected is not None:
+        spec_args["expected"] = expected
+    return AIMessage(content="", tool_calls=[
+        {"name": "capture_bug_screenshot", "args": {"bug_summary": summary}, "id": "c1"},
+        {"name": "generate_reproduction_spec", "args": spec_args, "id": "c2"},
+    ])
+
+
+def _block(title="Login error message does not match specification", observed=OBSERVED, expected=EXPECTED, confidence="confirmed"):
+    entry = {"title": title, "summary": "shows the wrong text", "observed": observed, "observed_at": "h3 on /",
+             "expected": expected, "confidence": confidence}
+    return AIMessage(content=f"done <bugs_found>{json.dumps([entry])}</bugs_found>")
+
+
+def test_the_same_observation_under_a_different_title_is_one_bug():
+    found = _extract_turn_findings([_shot_and_spec(), _block()])
+    assert found.confirmed == ["Login error message does not match specification: shows the wrong text"]
+    assert found.uncertain == []
+    assert [r["observed"] for r in found.evidence] == [OBSERVED]  # one record, the block's
+
+
+def test_whitespace_differences_do_not_hide_the_match():
+    found = _extract_turn_findings([_shot_and_spec(observed="Epic sadface:  Username is\nrequired"), _block()])
+    assert len(found.confirmed) == 1
+
+
+def test_a_screenshot_bug_without_a_closing_block_is_kept_and_gets_the_evidence_from_the_spec_call():
+    found = _extract_turn_findings([_shot_and_spec()])
+    assert found.confirmed == [SHOT_TITLE]
+    [rec] = found.evidence
+    assert rec["bug"] == SHOT_TITLE and rec["observed"] == OBSERVED and rec["expected"] == EXPECTED
+    assert rec["confidence"] == "confirmed"
+
+
+def test_different_observations_are_two_bugs():
+    found = _extract_turn_findings([_shot_and_spec(), _block(title="Footer link is dead", observed="404 page")])
+    assert len(found.confirmed) == 2
+
+
+def test_the_same_observed_text_with_a_different_expectation_is_not_merged():
+    found = _extract_turn_findings([_shot_and_spec(), _block(title="Unrelated wrong text", expected="Something else entirely")])
+    assert len(found.confirmed) == 2
+
+
+def test_without_an_observed_value_nothing_is_merged():
+    found = _extract_turn_findings([_shot_and_spec(observed=None, expected=None), _block(title="Another title entirely")])
+    assert len(found.confirmed) == 2
+
+
+def test_an_uncertain_block_with_the_same_observation_absorbs_the_screenshot_too():
+    found = _extract_turn_findings([_shot_and_spec(), _block(confidence="uncertain")])
+    assert found.confirmed == [] and len(found.uncertain) == 1
+
+
+def test_a_missing_expectation_on_one_side_still_matches_on_the_observed_value():
+    found = _extract_turn_findings([_shot_and_spec(expected=None), _block()])
+    assert len(found.confirmed) == 1
+
+
+def test_two_distinct_defects_each_keep_their_own_entry():
+    second = AIMessage(content="", tool_calls=[
+        {"name": "capture_bug_screenshot", "args": {"bug_summary": "Badge count is wrong"}, "id": "c3"},
+        {"name": "generate_reproduction_spec", "args": {"bug_summary": "Badge count is wrong", "observed": "5", "expected": "3"}, "id": "c4"},
+    ])
+    found = _extract_turn_findings([_shot_and_spec(), second, _block()])
+    titles = " | ".join(found.confirmed)
+    assert len(found.confirmed) == 2 and "Badge count is wrong" in titles and "does not match specification" in titles
+
+
+def test_the_tool_call_arguments_may_be_missing_or_malformed():
+    odd = AIMessage(content="", tool_calls=[{"name": "generate_reproduction_spec", "args": {"bug_summary": 7, "observed": None}, "id": "c9"},
+                                           {"name": "generate_reproduction_spec", "args": {}, "id": "c10"}])
+    assert _extract_turn_findings([odd, _shot_and_spec(observed=None, expected=None)]).confirmed == [SHOT_TITLE]
